@@ -3,6 +3,63 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/useAuthStore'
 import { useSettingsStore } from '../store/useSettingsStore'
 
+const BILLS = [1000, 500, 200, 100, 50, 20]
+const COINS = [20, 10, 5, 2, 1, 0.5]
+const fmtCash = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+
+function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) => void; onClose: () => void }) {
+  const [qty, setQty] = useState<Record<string, string>>({})
+  const total = [...BILLS, ...COINS].reduce((sum, d) => sum + (parseFloat(qty[String(d)] || '0') || 0) * d, 0)
+  const set = (d: number, v: string) => setQty(p => ({ ...p, [String(d)]: v }))
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: '#fff', borderRadius: 24, boxShadow: '0 24px 60px rgba(0,0,0,0.2)', padding: '28px 28px', width: 380, maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ fontSize: 16, fontWeight: 900, color: 'var(--nm-text)', marginBottom: 16, textAlign: 'center' }}>🪙 Contar Efectivo</div>
+
+        {/* Bills */}
+        <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--nm-accent)', marginBottom: 6 }}>Billetes</div>
+        {BILLS.map(d => {
+          const q = parseFloat(qty[String(d)] || '0') || 0
+          return (
+            <div key={d} style={{ display: 'grid', gridTemplateColumns: '70px 1fr 80px', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <div style={{ background: 'linear-gradient(145deg,#6b9cf0,#4d7ee8)', color: '#fff', fontWeight: 900, fontSize: 13, borderRadius: 8, padding: '4px 0', textAlign: 'center' }}>${d}</div>
+              <input type="number" value={qty[String(d)] ?? ''} onChange={e => set(d, e.target.value)} placeholder="0" min="0"
+                className="nm-input" style={{ padding: '6px 10px', fontSize: 14, fontWeight: 800, textAlign: 'center', width: '100%' }} onFocus={e => e.target.select()} />
+              <div style={{ textAlign: 'right', fontSize: 13, fontWeight: 700, color: q > 0 ? 'var(--nm-text)' : 'var(--nm-text-light)' }}>{q > 0 ? fmtCash(q * d) : '—'}</div>
+            </div>
+          )
+        })}
+
+        {/* Coins */}
+        <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--nm-text-muted)', margin: '10px 0 6px' }}>Monedas</div>
+        {COINS.map(d => {
+          const q = parseFloat(qty[String(d)] || '0') || 0
+          return (
+            <div key={d} style={{ display: 'grid', gridTemplateColumns: '70px 1fr 80px', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <div style={{ background: 'linear-gradient(145deg,#c8cdd5,#adb4be)', color: '#fff', fontWeight: 900, fontSize: 13, borderRadius: 8, padding: '4px 0', textAlign: 'center' }}>{d < 1 ? `${d * 100}¢` : `$${d}`}</div>
+              <input type="number" value={qty[String(d)] ?? ''} onChange={e => set(d, e.target.value)} placeholder="0" min="0"
+                className="nm-input" style={{ padding: '6px 10px', fontSize: 14, fontWeight: 800, textAlign: 'center', width: '100%' }} onFocus={e => e.target.select()} />
+              <div style={{ textAlign: 'right', fontSize: 13, fontWeight: 700, color: q > 0 ? 'var(--nm-text)' : 'var(--nm-text-light)' }}>{q > 0 ? fmtCash(q * d) : '—'}</div>
+            </div>
+          )
+        })}
+
+        {/* Total */}
+        <div style={{ background: 'var(--nm-bg)', borderRadius: 14, padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '14px 0', boxShadow: 'var(--nm-inset)' }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total</span>
+          <span style={{ fontSize: 26, fontWeight: 900, color: 'var(--nm-text)' }}>{fmtCash(total)}</span>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button onClick={onClose} className="nm-btn" style={{ flex: 1, padding: '11px', fontSize: 13 }}>Cancelar</button>
+          <button onClick={() => onConfirm(total)} className="nm-btn-accent" style={{ flex: 1, padding: '11px', fontSize: 13 }}>Usar {fmtCash(total)} →</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const navItems = [
   { path: '/ventas', label: 'Ventas', icon: '🛒', roles: ['admin', 'cajero'] },
   { path: '/corte', label: 'Corte', icon: '💰', roles: ['admin', 'cajero'] },
@@ -21,6 +78,7 @@ export default function Layout() {
   const [openingCash, setOpeningCash] = useState('')
   const [openingError, setOpeningError] = useState('')
   const [showLogoutBlock, setShowLogoutBlock] = useState(false)
+  const [showCashCounter, setShowCashCounter] = useState(false)
 
   const handleLogout = () => {
     if (shift) {
@@ -251,18 +309,27 @@ export default function Layout() {
               </div>
             </div>
 
-            <input
-              type="number"
-              value={openingCash}
-              onChange={e => setOpeningCash(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleOpenShift() }}
-              placeholder="0.00"
-              className="nm-input"
-              autoFocus
-              step="0.01"
-              min="0"
-              style={{ width: '100%', padding: '16px 18px', fontSize: 28, textAlign: 'right', fontWeight: 800, marginBottom: 12 }}
-            />
+            <div style={{ width: '100%', marginBottom: 12 }}>
+              <input
+                type="number"
+                value={openingCash}
+                onChange={e => setOpeningCash(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleOpenShift() }}
+                placeholder="0.00"
+                className="nm-input"
+                autoFocus
+                step="0.01"
+                min="0"
+                style={{ width: '100%', padding: '16px 18px', fontSize: 28, textAlign: 'right', fontWeight: 800, marginBottom: 8 }}
+              />
+              <button
+                onClick={() => setShowCashCounter(true)}
+                className="nm-btn"
+                style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 700, color: 'var(--nm-text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+              >
+                🪙 Contar billetes y monedas
+              </button>
+            </div>
 
             {openingError && (
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-danger)', marginBottom: 10 }}>
@@ -290,6 +357,13 @@ export default function Layout() {
               Cancelar y cerrar sesión
             </button>
           </div>
+
+          {showCashCounter && (
+            <CashCounterModal
+              onConfirm={total => { setOpeningCash(total.toFixed(2)); setShowCashCounter(false) }}
+              onClose={() => setShowCashCounter(false)}
+            />
+          )}
         </div>
       )}
     </div>
