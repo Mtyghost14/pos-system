@@ -288,6 +288,18 @@ function ModifyProductTab({ categories, showMsg }: any) {
     loadBarcodes(p.id)
   }, [])
 
+  useEffect(() => {
+    if (!search.trim()) { setResults([]); return }
+    const timer = setTimeout(async () => {
+      const byCode = await window.api.getProductByCode(search.trim())
+      if (byCode) { selectProduct(byCode); return }
+      const res = await window.api.getProducts(search.trim())
+      setResults(res)
+      if (res.length === 1) selectProduct(res[0])
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [search, selectProduct])
+
   const handleSearch = useCallback(async (q = search) => {
     if (!q.trim()) return
     const byCode = await window.api.getProductByCode(q.trim())
@@ -610,21 +622,27 @@ function DeleteProductTab({ showMsg, reload }: any) {
   const [confirm, setConfirm] = useState<Product | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
-  const handleSearch = useCallback(async (q = search) => {
-    if (!q.trim()) return
-    const byCode = await window.api.getProductByCode(q.trim())
-    if (byCode) { setConfirm(byCode); setSearch(''); setResults([]); return }
-    const res = await window.api.getProducts(q.trim())
-    setResults(res)
-    if (res.length === 1) { setConfirm(res[0]); setSearch(''); setResults([]) }
+  useEffect(() => {
+    if (!search.trim()) { setResults([]); return }
+    const timer = setTimeout(async () => {
+      const res = await window.api.getProducts(search.trim())
+      setResults(res)
+    }, 250)
+    return () => clearTimeout(timer)
   }, [search])
 
   const handleDelete = async () => {
     if (!confirm) return
     const res = await window.api.deleteProduct(confirm.id)
     if (res.success) {
-      showMsg('Producto eliminado'); setConfirm(null); setResults([]); reload()
-      setTimeout(() => searchRef.current?.focus(), 50)
+      showMsg('Producto eliminado')
+      setConfirm(null)
+      reload()
+      // Refresh results without clearing search
+      if (search.trim()) {
+        const updated = await window.api.getProducts(search.trim())
+        setResults(updated)
+      }
     } else showMsg('Error al eliminar', 'err')
   }
 
@@ -632,31 +650,26 @@ function DeleteProductTab({ showMsg, reload }: any) {
     <div className="max-w-lg space-y-4">
       <div style={{ background: "var(--nm-bg)", borderRadius: 16, boxShadow: "var(--nm-raised)", padding: 16 }}>
         <h2 className="font-bold text-gray-900 mb-3">Eliminar Producto</h2>
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <input
-              ref={searchRef}
-              autoFocus
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSearch()}
-              placeholder="Escanear código o escribir nombre..."
-              className="w-full border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <span className="absolute left-2.5 top-2 text-gray-400 text-base pointer-events-none">📷</span>
-          </div>
-          <button onClick={() => handleSearch()} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm">Buscar</button>
+        <div className="relative">
+          <input
+            ref={searchRef}
+            autoFocus
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar por nombre o código..."
+            className="w-full border rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400"
+          />
+          <span className="absolute left-2.5 top-2 text-gray-400 text-base pointer-events-none">🔍</span>
         </div>
-        <p className="text-xs text-gray-400 mt-1.5">Escanea el código de barras o escribe el nombre y presiona Enter</p>
         {results.length > 0 && (
           <div className="mt-3 border rounded-lg overflow-hidden">
-            {results.slice(0, 10).map(p => (
-              <div key={p.id} className="px-3 py-2 border-b last:border-0 flex justify-between items-center">
+            {results.slice(0, 15).map(p => (
+              <div key={p.id} className="px-3 py-2 border-b last:border-0 flex justify-between items-center hover:bg-red-50">
                 <div>
                   <span className="font-medium text-sm">{p.name}</span>
                   <span className="text-xs text-gray-400 font-mono ml-2">{p.code}</span>
                 </div>
-                <button onClick={() => setConfirm(p)} className="text-red-500 hover:text-red-700 text-sm font-medium">Eliminar</button>
+                <button onClick={() => setConfirm(p)} className="text-red-500 hover:text-red-700 text-sm font-bold">Eliminar</button>
               </div>
             ))}
           </div>

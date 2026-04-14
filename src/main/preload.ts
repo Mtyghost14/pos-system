@@ -94,6 +94,10 @@ const api = {
   showOpenDialog: (opts: any) => ipcRenderer.invoke('dialog:showOpen', opts),
   readExcelFile: (path: string) => ipcRenderer.invoke('excel:readFile', path),
 
+  // App window
+  onAppClosing: (cb: () => void) => ipcRenderer.on('app:closing', cb),
+  allowClose: () => ipcRenderer.send('app:allow-close'),
+
   // Backup
   createBackup: () => ipcRenderer.invoke('backup:create'),
   getBackups: () => ipcRenderer.invoke('backup:list'),

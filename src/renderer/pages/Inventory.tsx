@@ -62,12 +62,22 @@ function AdjustTab({ showMsg }: any) {
     setResults([])
   }, [mode])
 
+  useEffect(() => {
+    if (!search.trim()) { setResults([]); return }
+    const timer = setTimeout(async () => {
+      const byCode = await window.api.getProductByCode(search.trim())
+      if (byCode) { selectProduct(byCode); return }
+      const res = await window.api.getProducts(search.trim())
+      setResults(res)
+      if (res.length === 1) selectProduct(res[0])
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [search, selectProduct])
+
   const handleSearch = useCallback(async (q = search) => {
     if (!q.trim()) return
-    // Exact barcode match first (scanner sends full code + Enter)
     const byCode = await window.api.getProductByCode(q.trim())
     if (byCode) { selectProduct(byCode); return }
-    // Fall back to name search
     const res = await window.api.getProducts(q.trim())
     setResults(res)
     if (res.length === 1) { selectProduct(res[0]); return }

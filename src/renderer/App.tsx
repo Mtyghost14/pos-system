@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { HashRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { useAuthStore } from './store/useAuthStore'
 import { useSettingsStore } from './store/useSettingsStore'
 import Login from './pages/Login'
@@ -26,6 +26,28 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+function CloseGuard() {
+  const shift = useAuthStore(s => s.shift)
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    const handler = () => {
+      if (shift) {
+        navigate('/corte')
+        // Small delay so the navigation completes before the alert shows
+        setTimeout(() => {
+          alert('Tienes un turno activo. Realiza el corte antes de cerrar el programa.')
+        }, 100)
+      } else {
+        window.api.allowClose()
+      }
+    }
+    window.api.onAppClosing(handler)
+  }, [shift, navigate])
+
+  return null
+}
+
 export default function App() {
   const { loadSettings } = useSettingsStore()
 
@@ -35,6 +57,7 @@ export default function App() {
 
   return (
     <HashRouter>
+      <CloseGuard />
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>

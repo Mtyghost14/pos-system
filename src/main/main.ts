@@ -32,6 +32,18 @@ function createWindow() {
     mainWindow?.show()
   })
 
+  let forceClose = false
+  mainWindow.on('close', (e) => {
+    if (forceClose) return
+    e.preventDefault()
+    mainWindow?.webContents.send('app:closing')
+  })
+
+  ipcMain.on('app:allow-close', () => {
+    forceClose = true
+    mainWindow?.close()
+  })
+
   mainWindow.on('closed', () => {
     mainWindow = null
   })
