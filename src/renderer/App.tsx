@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { HashRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { useAuthStore } from './store/useAuthStore'
 import { useSettingsStore } from './store/useSettingsStore'
@@ -29,12 +29,18 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
 function CloseGuard() {
   const shift = useAuthStore(s => s.shift)
   const navigate = useNavigate()
+  const shiftRef = useRef(shift)
 
+  // Keep ref in sync without re-registering the listener
+  useEffect(() => {
+    shiftRef.current = shift
+  }, [shift])
+
+  // Register the listener exactly once
   useEffect(() => {
     const handler = () => {
-      if (shift) {
+      if (shiftRef.current) {
         navigate('/corte')
-        // Small delay so the navigation completes before the alert shows
         setTimeout(() => {
           alert('Tienes un turno activo. Realiza el corte antes de cerrar el programa.')
         }, 100)
@@ -43,7 +49,7 @@ function CloseGuard() {
       }
     }
     window.api.onAppClosing(handler)
-  }, [shift, navigate])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   return null
 }
@@ -63,8 +69,8 @@ export default function App() {
         <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
           <Route index element={<Navigate to="/ventas" replace />} />
           <Route path="ventas" element={<Sales />} />
-          <Route path="productos" element={<RequireAdmin><Products /></RequireAdmin>} />
-          <Route path="inventario" element={<RequireAdmin><Inventory /></RequireAdmin>} />
+          <Route path="productos" element={<RequireAuth><Products /></RequireAuth>} />
+          <Route path="inventario" element={<RequireAuth><Inventory /></RequireAuth>} />
           <Route path="compras" element={<RequireAdmin><Purchases /></RequireAdmin>} />
           <Route path="facturas" element={<RequireAdmin><Invoices /></RequireAdmin>} />
           <Route path="corte" element={<Corte />} />

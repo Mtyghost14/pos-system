@@ -8,6 +8,8 @@ const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))
 type Tab = 'ajustes' | 'bajos' | 'reporte' | 'movimientos'
 
 export default function Inventory() {
+  const { user } = useAuthStore()
+  const isAdmin = user?.role === 'admin'
   const [tab, setTab] = useState<Tab>('ajustes')
   const [msg, setMsg] = useState('')
   const [msgType, setMsgType] = useState<'ok' | 'err'>('ok')
@@ -17,12 +19,13 @@ export default function Inventory() {
     setTimeout(() => setMsg(''), 3000)
   }
 
-  const tabs = [
+  const allTabs = [
     { id: 'ajustes' as Tab, label: 'Ajustes de Inventario' },
     { id: 'bajos' as Tab, label: 'Productos Bajos' },
     { id: 'reporte' as Tab, label: 'Reporte de Inventario' },
     { id: 'movimientos' as Tab, label: 'Movimientos' },
   ]
+  const tabs = isAdmin ? allTabs : allTabs.filter(t => t.id === 'ajustes')
 
   return (
     <PageShell

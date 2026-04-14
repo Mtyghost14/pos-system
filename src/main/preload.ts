@@ -83,6 +83,8 @@ const api = {
   // Printer
   printReceipt: (data: any) => ipcRenderer.invoke('printer:printReceipt', data),
   printShiftSummary: (data: any) => ipcRenderer.invoke('printer:printShift', data),
+  printDailyCorte: (data: any) => ipcRenderer.invoke('printer:printDailyCorte', data),
+  getDailyCorte: () => ipcRenderer.invoke('reports:getDailyCorte'),
   getPrinterPorts: () => ipcRenderer.invoke('printer:getPorts'),
   getSystemPrinters: () => ipcRenderer.invoke('printer:getSystemPrinters'),
   printZPL: (data: { zpl: string; printerName: string }) => ipcRenderer.invoke('printer:printZPL', data),

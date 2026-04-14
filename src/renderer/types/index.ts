@@ -142,6 +142,13 @@ export interface Settings {
   store_rfc: string
   printer_port: string
   receipt_footer: string
+  receipt_font_size: string
+  receipt_show_folio: string
+  receipt_show_cashier: string
+  label_printer: string
+  label_font_size: string
+  label_show_price: string
+  label_show_barcode: string
   rfc_emisor: string
   razon_social_emisor: string
   regimen_fiscal_emisor: string

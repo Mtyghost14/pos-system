@@ -153,7 +153,7 @@ export default function Corte() {
   const [loading, setLoading] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
   const [showCashCounter, setShowCashCounter] = useState(false)
-  const [printing, setPrinting] = useState(false)
+  const [printing, setPrinting] = useState<false | 'cajero' | 'dia'>(false)
   const [closedData, setClosedData] = useState<any>(null)
 
   useEffect(() => {
@@ -216,8 +216,15 @@ export default function Corte() {
   }
 
   const handlePrintShift = async (data?: any) => {
-    setPrinting(true)
+    setPrinting('cajero')
     await window.api.printShiftSummary(data ?? buildPrintData())
+    setPrinting(false)
+  }
+
+  const handlePrintDailyCorte = async () => {
+    setPrinting('dia')
+    const dailyData = await (window.api as any).getDailyCorte()
+    await (window.api as any).printDailyCorte(dailyData)
     setPrinting(false)
   }
 
@@ -229,14 +236,24 @@ export default function Corte() {
           <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--nm-text)' }}>Sin turno activo</div>
           <div style={{ fontSize: 13, fontWeight: 600 }}>Abra un turno desde la pantalla de Ventas</div>
           {closedData && (
-            <button
-              onClick={async () => { await handlePrintShift(closedData); logout() }}
-              disabled={printing}
-              className="nm-btn-accent"
-              style={{ marginTop: 16, padding: '14px 32px', fontSize: 14, fontWeight: 800, borderRadius: 14, display: 'flex', alignItems: 'center', gap: 8 }}
-            >
-              🖨️ {printing ? 'Imprimiendo...' : 'Imprimir Ticket de Corte'}
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 16 }}>
+              <button
+                onClick={async () => { await handlePrintShift(closedData); logout() }}
+                disabled={!!printing}
+                className="nm-btn-accent"
+                style={{ padding: '14px 32px', fontSize: 14, fontWeight: 800, borderRadius: 14, display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                🖨️ {printing === 'cajero' ? 'Imprimiendo...' : 'Imprimir Corte de Cajero'}
+              </button>
+              <button
+                onClick={async () => { await handlePrintDailyCorte(); logout() }}
+                disabled={!!printing}
+                className="nm-btn"
+                style={{ padding: '14px 32px', fontSize: 14, fontWeight: 800, borderRadius: 14, display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                📅 {printing === 'dia' ? 'Imprimiendo...' : 'Imprimir Corte del Día'}
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -266,14 +283,6 @@ export default function Corte() {
         <div style={{ flex: 1 }} />
         <button onClick={loadSummary} className="nm-btn" style={{ padding: '6px 14px', fontSize: 12, color: 'var(--nm-accent)' }}>
           Actualizar
-        </button>
-        <button
-          onClick={handlePrintShift}
-          disabled={printing}
-          className="nm-btn"
-          style={{ padding: '8px 18px', fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}
-        >
-          🖨️ {printing ? 'Imprimiendo...' : 'Imprimir Corte'}
         </button>
         <button
           onClick={() => {
@@ -407,18 +416,26 @@ export default function Corte() {
       {showConfirm && (
         <Modal title={closedData ? 'Turno Cerrado' : 'Cerrar Turno'} onClose={() => { if (closedData) { logout() } else { setShowConfirm(false) } }} size="sm">
           {closedData ? (
-            <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' }}>
-              <div style={{ width: 64, height: 64, borderRadius: 18, background: 'linear-gradient(145deg, #46cf80, #2fa85d)', boxShadow: '0 6px 20px rgba(47,168,93,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30 }}>✓</div>
+            <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
+              <div style={{ width: 56, height: 56, borderRadius: 16, background: 'linear-gradient(145deg, #46cf80, #2fa85d)', boxShadow: '0 6px 20px rgba(47,168,93,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 26 }}>✓</div>
               <p style={{ fontSize: 15, fontWeight: 800, color: 'var(--nm-text)', margin: 0 }}>Turno cerrado correctamente</p>
               <button
                 onClick={() => handlePrintShift(closedData)}
-                disabled={printing}
+                disabled={!!printing}
                 className="nm-btn-accent"
-                style={{ width: '100%', padding: '14px', fontSize: 14, fontWeight: 800, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                style={{ width: '100%', padding: '13px', fontSize: 13, fontWeight: 800, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
               >
-                🖨️ {printing ? 'Abriendo impresión...' : 'Imprimir Ticket de Corte'}
+                🖨️ {printing === 'cajero' ? 'Imprimiendo...' : 'Imprimir Corte de Cajero'}
               </button>
-              <button onClick={() => logout()} className="nm-btn" style={{ width: '100%', padding: '10px', fontSize: 13, color: 'var(--nm-text-muted)' }}>
+              <button
+                onClick={handlePrintDailyCorte}
+                disabled={!!printing}
+                className="nm-btn"
+                style={{ width: '100%', padding: '13px', fontSize: 13, fontWeight: 800, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--nm-text)' }}
+              >
+                📅 {printing === 'dia' ? 'Imprimiendo...' : 'Imprimir Corte del Día'}
+              </button>
+              <button onClick={() => logout()} className="nm-btn" style={{ width: '100%', padding: '10px', fontSize: 12, color: 'var(--nm-text-muted)' }}>
                 Salir sin imprimir
               </button>
             </div>

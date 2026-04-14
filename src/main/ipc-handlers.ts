@@ -145,12 +145,25 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('products:create', (_, data: any) => {
-    const exists = db.prepare('SELECT id FROM products WHERE code = ?').get(data.code)
-    if (exists) return { success: false, message: 'El código ya existe' }
-    const res = db.prepare(`
-      INSERT INTO products (code, name, category_id, cost, price, stock, min_stock)
-      VALUES (?,?,?,?,?,?,?)
-    `).run(data.code, data.name, data.category_id, data.cost, data.price, data.stock || 0, data.min_stock || 0)
+    // Check if an ACTIVE product already uses this code
+    const activeConflict = db.prepare('SELECT id FROM products WHERE code = ? AND active = 1').get(data.code)
+    if (activeConflict) return { success: false, message: 'El código ya está en uso por otro producto activo' }
+
+    // If a deleted product had this code, reuse its row instead of inserting a new one
+    const deleted = db.prepare('SELECT id FROM products WHERE code = ? AND active = 0').get(data.code) as any
+    let res: any
+    if (deleted) {
+      db.prepare(`
+        UPDATE products SET name=?, category_id=?, cost=?, price=?, stock=?, min_stock=?, active=1, updated_at=datetime('now','localtime')
+        WHERE id=?
+      `).run(data.name, data.category_id, data.cost, data.price, data.stock || 0, data.min_stock || 0, deleted.id)
+      res = { lastInsertRowid: deleted.id }
+    } else {
+      res = db.prepare(`
+        INSERT INTO products (code, name, category_id, cost, price, stock, min_stock)
+        VALUES (?,?,?,?,?,?,?)
+      `).run(data.code, data.name, data.category_id, data.cost, data.price, data.stock || 0, data.min_stock || 0)
+    }
 
     if (data.stock > 0) {
       db.prepare(`
@@ -164,7 +177,7 @@ export function registerIpcHandlers() {
   ipcMain.handle('products:update', (_, data: any) => {
     // If code is being changed, check it's not taken by another product
     if (data.code) {
-      const conflict = db.prepare('SELECT id FROM products WHERE code = ? AND id != ?').get(data.code, data.id) as any
+      const conflict = db.prepare('SELECT id FROM products WHERE code = ? AND id != ? AND active = 1').get(data.code, data.id) as any
       if (conflict) return { success: false, message: 'Ese código ya está en uso por otro producto' }
       const conflictBarcode = db.prepare('SELECT id FROM product_barcodes WHERE code = ? AND product_id != ?').get(data.code, data.id) as any
       if (conflictBarcode) return { success: false, message: 'Ese código ya está registrado como código adicional de otro producto' }
@@ -305,12 +318,15 @@ export function registerIpcHandlers() {
     const expected_cash = (shift?.opening_cash || 0) + sales.efectivo + entradas - salidas - devoluciones
 
     const salesByCategory = db.prepare(`
-      SELECT c.name as category, SUM(si.quantity * si.unit_price) as total
+      SELECT
+        COALESCE(c.name, 'Sin categoría') as category,
+        SUM(si.quantity * si.unit_price) as total,
+        SUM(si.quantity * si.unit_cost) as cost
       FROM sale_items si
       JOIN sales s ON si.sale_id = s.id
       JOIN products p ON si.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE s.shift_id = ?
+      WHERE s.shift_id = ? AND s.cancelled = 0
       GROUP BY c.name ORDER BY total DESC
     `).all(shiftId)
 
@@ -806,6 +822,76 @@ export function registerIpcHandlers() {
     return { kpis, byDay, byPayment, byCategory, topProducts, topProfit, byHour }
   })
 
+  ipcMain.handle('reports:getDailyCorte', () => {
+    const sales = db.prepare(`
+      SELECT
+        COUNT(*) as count,
+        COALESCE(SUM(total),0) as total,
+        COALESCE(SUM(cost_total),0) as cost_total,
+        COALESCE(SUM(CASE WHEN payment_type='efectivo'      THEN total ELSE 0 END),0) as efectivo,
+        COALESCE(SUM(CASE WHEN payment_type='tarjeta'       THEN total ELSE 0 END),0) as tarjeta,
+        COALESCE(SUM(CASE WHEN payment_type='transferencia' THEN total ELSE 0 END),0) as transferencia,
+        COALESCE(SUM(CASE WHEN payment_type='mixto'         THEN total ELSE 0 END),0) as mixto
+      FROM sales
+      WHERE DATE(timestamp,'localtime') = DATE('now','localtime') AND cancelled = 0
+    `).get() as any
+
+    const byCashier = db.prepare(`
+      SELECT u.name as cashier, COUNT(s.id) as count, COALESCE(SUM(s.total),0) as total
+      FROM sales s JOIN users u ON s.cashier_id = u.id
+      WHERE DATE(s.timestamp,'localtime') = DATE('now','localtime') AND s.cancelled = 0
+      GROUP BY s.cashier_id ORDER BY total DESC
+    `).all() as any[]
+
+    const byCategory = db.prepare(`
+      SELECT COALESCE(c.name,'Sin categoría') as category,
+             SUM(si.quantity * si.unit_price) as total,
+             SUM(si.quantity * si.unit_cost) as cost
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      JOIN products p ON si.product_id = p.id
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE DATE(s.timestamp,'localtime') = DATE('now','localtime') AND s.cancelled = 0
+      GROUP BY c.name ORDER BY total DESC
+    `).all() as any[]
+
+    const shifts = db.prepare(`
+      SELECT COUNT(*) as count, COALESCE(SUM(opening_cash),0) as opening_cash
+      FROM shifts
+      WHERE DATE(started_at,'localtime') = DATE('now','localtime')
+    `).get() as any
+
+    const cashMovements = db.prepare(`
+      SELECT cm.type, cm.concept, cm.amount
+      FROM cash_movements cm
+      JOIN shifts sh ON cm.shift_id = sh.id
+      WHERE DATE(sh.started_at,'localtime') = DATE('now','localtime')
+      ORDER BY cm.id ASC
+    `).all() as any[]
+
+    const entradas = cashMovements.filter((m: any) => m.type === 'entrada').reduce((s: number, m: any) => s + (m.amount || 0), 0)
+    const salidas  = cashMovements.filter((m: any) => m.type === 'salida').reduce((s: number, m: any) => s + (m.amount || 0), 0)
+
+    const salesTotal = sales?.total || 0
+    const costTotal  = sales?.cost_total || 0
+    const openingCash = shifts?.opening_cash || 0
+    const expectedCash = openingCash + (sales?.efectivo || 0) + entradas - salidas
+
+    return {
+      sales,
+      byCashier,
+      byCategory,
+      movementDetails: cashMovements,
+      shiftsCount: shifts?.count || 0,
+      entradas,
+      salidas,
+      openingCash,
+      expectedCash,
+      utility: salesTotal - costTotal,
+      date: new Date().toLocaleDateString('es-MX', { weekday:'long', year:'numeric', month:'long', day:'numeric' }),
+    }
+  })
+
   ipcMain.handle('reports:salesByPeriod', (_, filters: any) => {
     let query = `
       SELECT s.folio, s.timestamp, s.payment_type, s.total, s.cost_total,
@@ -907,6 +993,10 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('printer:printReceipt', async (_, data: any) => {
+    // Merge stored settings so font size / show toggles are always applied
+    const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
+    const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
+    const mergedData = { ...stored, ...data }
     return new Promise<{ success: boolean; message?: string }>((resolve) => {
       const win = new BrowserWindow({
         width: 320,
@@ -914,37 +1004,60 @@ export function registerIpcHandlers() {
         show: false,
         webPreferences: { nodeIntegration: false, contextIsolation: true },
       })
-      const html = buildReceiptHTML(data)
+      const html = buildReceiptHTML(mergedData)
+      const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
       win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
       win.webContents.on('did-finish-load', () => {
-        win.webContents.print(
-          { silent: false, printBackground: true, margins: { marginType: 'none' } },
-          (success, reason) => {
-            win.destroy()
-            resolve(success ? { success: true } : { success: false, message: reason })
-          }
-        )
+        const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
+        if (printerName) printOpts.deviceName = printerName
+        win.webContents.print(printOpts, (success, reason) => {
+          win.destroy()
+          resolve(success ? { success: true } : { success: false, message: reason })
+        })
       })
       win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
     })
   })
 
   ipcMain.handle('printer:printShift', async (_, data: any) => {
+    const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
+    const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
+    const mergedData = { ...stored, ...data }
     return new Promise<{ success: boolean; message?: string }>((resolve) => {
       const win = new BrowserWindow({
         width: 320, height: 900, show: false,
         webPreferences: { nodeIntegration: false, contextIsolation: true },
       })
-      const html = buildShiftHTML(data)
+      const html = buildShiftHTML(mergedData)
+      const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
       win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
       win.webContents.on('did-finish-load', () => {
-        win.webContents.print(
-          { silent: false, printBackground: true, margins: { marginType: 'none' } },
-          (success, reason) => {
-            win.destroy()
-            resolve(success ? { success: true } : { success: false, message: reason })
-          }
-        )
+        const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
+        if (printerName) printOpts.deviceName = printerName
+        win.webContents.print(printOpts, (success, reason) => {
+          win.destroy()
+          resolve(success ? { success: true } : { success: false, message: reason })
+        })
+      })
+      win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
+    })
+  })
+
+  ipcMain.handle('printer:printDailyCorte', async (_, dailyData: any) => {
+    const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
+    const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
+    const printerName = (stored.printer_port || '').trim()
+    return new Promise<{ success: boolean; message?: string }>((resolve) => {
+      const win = new BrowserWindow({ width: 320, height: 900, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true } })
+      const html = buildDailyCorteHTML(dailyData, stored)
+      win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      win.webContents.on('did-finish-load', () => {
+        const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
+        if (printerName) printOpts.deviceName = printerName
+        win.webContents.print(printOpts, (success, reason) => {
+          win.destroy()
+          resolve(success ? { success: true } : { success: false, message: reason })
+        })
       })
       win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
     })
@@ -1166,28 +1279,39 @@ function generateCFDIXml(data: any): string {
 function buildReceiptHTML(data: any): string {
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 
+  // Font size scaling
+  const sizeKey = data.receipt_font_size || 'medium'
+  const fontBase = sizeKey === 'small' ? 18 : sizeKey === 'large' ? 26 : 22
+  const fontH1 = fontBase + 4
+  const fontSub = fontBase - 4
+  const fontMeta = fontBase - 4
+  const fontTotal = fontBase + 4
+
+  const showFolio = data.receipt_show_folio !== '0'
+  const showCashier = data.receipt_show_cashier !== '0'
+
   const itemRows = (data.items || []).map((item: any) => `
     <tr>
-      <td style="padding:3px 0;font-size:48px">${item.name}</td>
-      <td style="text-align:right;white-space:nowrap;padding:3px 0 3px 16px;font-size:48px">${item.qty} x ${fmt(item.price)}</td>
-      <td style="text-align:right;white-space:nowrap;padding:3px 0 3px 16px;font-size:48px;font-weight:700">${fmt(item.qty * item.price)}</td>
+      <td style="padding:2px 0;font-size:${fontBase}px">${item.name}</td>
+      <td style="text-align:right;white-space:nowrap;padding:2px 0 2px 8px;font-size:${fontBase}px">${item.qty}x${fmt(item.price)}</td>
+      <td style="text-align:right;white-space:nowrap;padding:2px 0 2px 8px;font-size:${fontBase}px;font-weight:900">${fmt(item.qty * item.price)}</td>
     </tr>
-    ${item.discount > 0 ? `<tr><td colspan="3" style="font-size:40px;color:#888;padding-bottom:3px">  Descuento: -${fmt(item.discount * item.qty)}</td></tr>` : ''}
+    ${item.discount > 0 ? `<tr><td colspan="3" style="font-size:${fontMeta}px;color:#888;padding-bottom:2px"> Desc: -${fmt(item.discount * item.qty)}</td></tr>` : ''}
   `).join('')
 
   let paymentRows = ''
   if (data.isMixed && data.activePayments) {
     for (const [method, amount] of Object.entries(data.activePayments as Record<string, number>)) {
       const label = method.charAt(0).toUpperCase() + method.slice(1)
-      paymentRows += `<div style="display:flex;justify-content:space-between;font-size:48px"><span>${label}</span><span>${fmt(amount as number)}</span></div>`
+      paymentRows += `<div style="display:flex;justify-content:space-between;font-size:${fontBase - 1}px"><span>${label}</span><span>${fmt(amount as number)}</span></div>`
     }
   } else {
     const label = (data.paymentType || 'efectivo').charAt(0).toUpperCase() + (data.paymentType || 'efectivo').slice(1)
-    paymentRows = `<div style="display:flex;justify-content:space-between;font-size:48px"><span>${label}</span><span>${fmt(data.received || data.total)}</span></div>`
+    paymentRows = `<div style="display:flex;justify-content:space-between;font-size:${fontBase - 1}px"><span>${label}</span><span>${fmt(data.received || data.total)}</span></div>`
   }
 
   const changeRow = (data.change ?? 0) > 0
-    ? `<div style="display:flex;justify-content:space-between;font-size:52px;font-weight:900;color:#1a7a3a"><span>CAMBIO</span><span>${fmt(data.change)}</span></div>`
+    ? `<div style="display:flex;justify-content:space-between;font-size:${fontBase + 2}px;font-weight:900;color:#1a7a3a"><span>CAMBIO</span><span>${fmt(data.change)}</span></div>`
     : ''
 
   return `<!DOCTYPE html>
@@ -1198,33 +1322,33 @@ function buildReceiptHTML(data: any): string {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: 'Courier New', Courier, monospace;
-    font-size: 48px;
+    font-size: ${fontBase}px;
     font-weight: 700;
     color: #000;
     background: #fff;
     width: 76mm;
-    padding: 4mm;
+    padding: 3mm;
   }
-  h1 { font-size: 60px; text-align: center; font-weight: 900; margin-bottom: 2px; }
-  .sub { font-size: 40px; text-align: center; color: #444; font-weight: 700; }
-  .meta { font-size: 40px; margin: 1px 0; }
-  table { width: 100%; border-collapse: collapse; margin: 6px 0; }
-  .divider { border-top: 2px solid #000; margin: 6px 0; }
-  .total-row { font-size: 60px; font-weight: 900; display: flex; justify-content: space-between; padding: 4px 0; }
+  h1 { font-size: ${fontH1}px; text-align: center; font-weight: 900; margin-bottom: 1px; }
+  .sub { font-size: ${fontSub}px; text-align: center; color: #444; font-weight: 700; }
+  .meta { font-size: ${fontMeta}px; margin: 1px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 4px 0; }
+  .divider { border-top: 1px solid #000; margin: 4px 0; }
+  .total-row { font-size: ${fontTotal}px; font-weight: 900; display: flex; justify-content: space-between; padding: 3px 0; }
   @media print {
     @page { margin: 0; size: 80mm auto; }
-    body { padding: 3mm; }
+    body { padding: 2mm; }
   }
 </style>
 </head>
 <body>
-  <h1>${data.storeName || 'Mi Tienda'}</h1>
-  ${data.storeAddress ? `<div class="sub">${data.storeAddress}</div>` : ''}
-  ${data.storePhone ? `<div class="sub">Tel: ${data.storePhone}</div>` : ''}
+  <h1>${data.storeName || data.store_name || 'Mi Tienda'}</h1>
+  ${(data.storeAddress || data.store_address) ? `<div class="sub">${data.storeAddress || data.store_address}</div>` : ''}
+  ${(data.storePhone || data.store_phone) ? `<div class="sub">Tel: ${data.storePhone || data.store_phone}</div>` : ''}
   <div class="divider"></div>
   <div class="meta">Fecha: ${data.date}</div>
-  <div class="meta">Folio: <b>${data.folio}</b></div>
-  <div class="meta">Cajero: ${data.cashierName || ''}</div>
+  ${showFolio ? `<div class="meta">Folio: <b>${data.folio}</b></div>` : ''}
+  ${showCashier ? `<div class="meta">Cajero: ${data.cashierName || ''}</div>` : ''}
   <div class="divider"></div>
   <table>${itemRows}</table>
   <div class="divider"></div>
@@ -1233,7 +1357,7 @@ function buildReceiptHTML(data: any): string {
   ${paymentRows}
   ${changeRow}
   <div class="divider"></div>
-  <div style="text-align:center;font-size:40px;margin-top:4px">${data.footer || '¡Gracias por su compra!'}</div>
+  <div style="text-align:center;font-size:${fontMeta}px;margin-top:3px">${data.footer || data.receipt_footer || '¡Gracias por su compra!'}</div>
 </body>
 </html>`
 }
@@ -1285,18 +1409,24 @@ function buildReceiptPrintData(data: any): any[] {
 function buildShiftHTML(data: any): string {
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 
+  const sizeKey = data.receipt_font_size || 'medium'
+  const fontBase = sizeKey === 'small' ? 20 : sizeKey === 'large' ? 26 : 23
+
   const section = (title: string) =>
-    `<div class="section">== ${title} ==</div>`
+    `<div class="section">${title}</div>`
 
   const row = (label: string, value: string, bold = false) =>
     `<div class="row ${bold ? 'bold' : ''}"><span>${label}</span><span>${value}</span></div>`
 
-  const sep = `<div class="sep">--------------------------------</div>`
-
-  // Categories
-  const catRows = (data.salesByCategory || []).map((c: any) =>
-    row(c.category || 'Sin categoría', fmt(c.total))
+  // Categories — ventas + ganancia
+  const catVentasRows = (data.salesByCategory || []).map((c: any) =>
+    row(c.category || 'Sin cat.', fmt(c.total))
   ).join('')
+
+  const catGananciaRows = (data.salesByCategory || []).map((c: any) => {
+    const profit = (c.total || 0) - (c.cost || 0)
+    return row(c.category || 'Sin cat.', fmt(profit))
+  }).join('')
 
   // Cash movements
   const entradas = (data.movementDetails || []).filter((m: any) => m.type === 'entrada')
@@ -1304,15 +1434,11 @@ function buildShiftHTML(data: any): string {
 
   const entradaRows = entradas.length
     ? entradas.map((m: any) => row(m.concept || 'Entrada', fmt(m.amount))).join('')
-    : `<div class="note">- Sin entradas -</div>`
+    : `<div class="note">Sin entradas</div>`
 
   const salidaRows = salidas.length
     ? salidas.map((m: any) => row(m.concept || 'Retiro', fmt(m.amount))).join('')
-    : `<div class="note">- Sin salidas -</div>`
-
-  const mixedRows = (data.sales?.mixedPayments || []).map((m: any) =>
-    row(m.method, fmt(m.amount))
-  ).join('')
+    : `<div class="note">Sin salidas</div>`
 
   return `<!DOCTYPE html>
 <html>
@@ -1322,26 +1448,25 @@ function buildShiftHTML(data: any): string {
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     font-family: 'Courier New', Courier, monospace;
-    font-size: 44px;
-    font-weight: 700;
+    font-size: ${fontBase}px;
+    font-weight: 400;
     color: #000;
     background: #fff;
     width: 76mm;
-    padding: 4mm;
+    padding: 3mm;
   }
-  .center  { text-align: center; }
-  .store   { font-size: 56px; font-weight: 900; text-align: center; margin-bottom: 2px; }
-  .sub     { font-size: 38px; font-weight: 700; text-align: center; color: #333; }
-  .divider { border-top: 2px solid #000; margin: 5px 0; }
-  .title   { font-size: 52px; font-weight: 900; text-align: center; margin: 4px 0; letter-spacing: 0.05em; }
-  .section { font-size: 44px; font-weight: 900; text-align: center; margin: 6px 0 2px; letter-spacing: 0.04em; text-decoration: underline; }
-  .row     { display: flex; justify-content: space-between; font-size: 44px; font-weight: 700; padding: 2px 0; }
-  .row.bold{ font-weight: 900; font-size: 46px; }
-  .note    { font-size: 38px; font-weight: 700; text-align: center; color: #555; padding: 2px 0; }
-  .total   { display: flex; justify-content: space-between; font-size: 48px; font-weight: 900; padding: 4px 0; border-top: 2px solid #000; margin-top: 3px; }
+  .store   { font-size: ${fontBase + 5}px; font-weight: 700; text-align: center; margin-bottom: 1px; }
+  .sub     { font-size: ${fontBase - 3}px; font-weight: 400; text-align: center; color: #333; }
+  .divider { border-top: 1px solid #000; margin: 4px 0; }
+  .title   { font-size: ${fontBase + 3}px; font-weight: 700; text-align: center; margin: 3px 0; }
+  .section { font-size: ${fontBase - 1}px; font-weight: 700; text-align: center; margin: 5px 0 2px; text-decoration: underline; }
+  .row     { display: flex; justify-content: space-between; font-size: ${fontBase - 1}px; font-weight: 400; padding: 1px 0; }
+  .row.bold{ font-weight: 700; font-size: ${fontBase}px; }
+  .note    { font-size: ${fontBase - 3}px; font-weight: 400; text-align: center; color: #555; padding: 1px 0; }
+  .total   { display: flex; justify-content: space-between; font-size: ${fontBase + 1}px; font-weight: 700; padding: 3px 0; border-top: 1px solid #000; margin-top: 2px; }
   @media print {
     @page { margin: 0; size: 80mm auto; }
-    body  { padding: 3mm; }
+    body  { padding: 2mm; }
   }
 </style>
 </head>
@@ -1351,28 +1476,27 @@ function buildShiftHTML(data: any): string {
   ${data.storePhone   ? `<div class="sub">${data.storePhone}</div>` : ''}
   ${data.storeSocial  ? `<div class="sub">${data.storeSocial}</div>` : ''}
   <div class="divider"></div>
-  <div class="title">CORTE DEL DIA</div>
+  <div class="title">CORTE DE CAJERO</div>
   <div class="divider"></div>
-  <div class="row"><span>Realizado:</span><span>${data.endedAt || data.startedAt}</span></div>
-  <div class="row"><span>Cajero:</span><span>${data.cashierName || ''}</span></div>
-  <div class="row"><span>Turno #${data.shiftId || ''}:</span><span>${data.startedAt}</span></div>
-  <div class="row"><span>Ventas totales:</span><span>${fmt(data.sales?.total)}</span></div>
-  <div class="row"><span>N° ventas:</span><span>${data.sales?.count || 0}</span></div>
+  ${row('Cajero:', data.cashierName || '')}
+  ${row('Turno #:', String(data.shiftId || ''))}
+  ${row('Inicio:', data.startedAt)}
+  ${row('Cierre:', data.endedAt || '')}
+  ${row('N° ventas:', String(data.sales?.count || 0))}
 
   ${section('VENTAS')}
   ${row('Efectivo:', fmt(data.sales?.efectivo))}
   ${row('Tarjeta:', fmt(data.sales?.tarjeta))}
   ${row('Transferencia:', fmt(data.sales?.transferencia))}
-  ${row('Mixto:', fmt(data.sales?.mixto || 0))}
+  ${(data.sales?.mixto || 0) > 0 ? row('Mixto:', fmt(data.sales?.mixto)) : ''}
   <div class="total"><span>TOTAL VENTAS</span><span>${fmt(data.sales?.total)}</span></div>
 
-  ${section('POR DEPTO')}
-  ${catRows || `<div class="note">Sin datos</div>`}
+  ${section('VENTAS POR DEPTO')}
+  ${catVentasRows || `<div class="note">Sin datos</div>`}
 
-  ${section('GANANCIAS')}
-  ${row('Ventas:', fmt(data.sales?.total))}
-  ${row('Costo:', fmt(data.sales?.cost_total || 0))}
-  <div class="total"><span>UTILIDAD</span><span>${fmt(data.utility || 0)}</span></div>
+  ${section('GANANCIA POR DEPTO')}
+  ${catGananciaRows || `<div class="note">Sin datos</div>`}
+  <div class="total"><span>UTILIDAD TOTAL</span><span>${fmt(data.utility || 0)}</span></div>
 
   ${section('ENTRADAS EFECTIVO')}
   ${entradaRows}
@@ -1421,4 +1545,99 @@ function buildShiftPrintData(data: any): any[] {
     { type: 'text', value: `Diferencia: ${fmt(data.countedCash - data.expectedCash)}`, style: { fontWeight: '700' } },
     { type: 'text', value: ' ', style: {} },
   ]
+}
+
+function buildDailyCorteHTML(data: any, stored: any): string {
+  const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  const sizeKey = stored.receipt_font_size || 'medium'
+  const fontBase = sizeKey === 'small' ? 20 : sizeKey === 'large' ? 26 : 23
+
+  const section = (t: string) => `<div class="section">${t}</div>`
+  const row = (l: string, v: string, bold = false) =>
+    `<div class="row ${bold ? 'bold' : ''}"><span>${l}</span><span>${v}</span></div>`
+
+  const cashierRows = (data.byCashier || []).map((c: any) =>
+    row(c.cashier, `${c.count} vtas · ${fmt(c.total)}`)
+  ).join('')
+
+  const catVentasRows = (data.byCategory || []).map((c: any) =>
+    row(c.category || 'Sin cat.', fmt(c.total))
+  ).join('')
+
+  const catGananciaRows = (data.byCategory || []).map((c: any) => {
+    const profit = (c.total || 0) - (c.cost || 0)
+    return row(c.category || 'Sin cat.', fmt(profit))
+  }).join('')
+
+  const entradas = (data.movementDetails || []).filter((m: any) => m.type === 'entrada')
+  const salidas  = (data.movementDetails || []).filter((m: any) => m.type === 'salida')
+
+  const entradaRows = entradas.length
+    ? entradas.map((m: any) => row(m.concept || 'Entrada', fmt(m.amount))).join('')
+    : `<div class="note">Sin entradas</div>`
+
+  const salidaRows = salidas.length
+    ? salidas.map((m: any) => row(m.concept || 'Retiro', fmt(m.amount))).join('')
+    : `<div class="note">Sin salidas</div>`
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Courier New',Courier,monospace; font-size:${fontBase}px; font-weight:550; color:#000; background:#fff; width:76mm; padding:3mm; }
+  .store   { font-size:${fontBase+5}px; font-weight:800; text-align:center; margin-bottom:1px; }
+  .sub     { font-size:${fontBase-3}px; font-weight:500; text-align:center; color:#333; }
+  .divider { border-top:1px solid #000; margin:4px 0; }
+  .title   { font-size:${fontBase+3}px; font-weight:750; text-align:center; margin:3px 0; }
+  .section { font-size:${fontBase-1}px; font-weight:750; text-align:center; margin:5px 0 2px; text-decoration:underline; }
+  .row     { display:flex; justify-content:space-between; font-size:${fontBase-1}px; font-weight:400; padding:1px 0; }
+  .row.bold{ font-weight:800; font-size:${fontBase}px; }
+  .note    { font-size:${fontBase-3}px; font-weight:600; text-align:center; color:#555; padding:1px 0; }
+  .total   { display:flex; justify-content:space-between; font-size:${fontBase+1}px; font-weight:700; padding:3px 0; border-top:1px solid #000; margin-top:2px; }
+  @media print { @page { margin:0; size:80mm auto; } body { padding:2mm; } }
+</style></head><body>
+  <div class="store">${stored.store_name || 'Mi Tienda'}</div>
+  ${stored.store_address ? `<div class="sub">${stored.store_address}</div>` : ''}
+  ${stored.store_phone   ? `<div class="sub">${stored.store_phone}</div>` : ''}
+  <div class="divider"></div>
+  <div class="title">CORTE DEL DÍA</div>
+  <div class="note">${data.date || ''}</div>
+  <div class="divider"></div>
+  ${row('Turnos trabajados:', String(data.shiftsCount || 0))}
+  ${row('N° transacciones:', String(data.sales?.count || 0))}
+
+  ${section('VENTAS')}
+  ${row('Efectivo:', fmt(data.sales?.efectivo))}
+  ${row('Tarjeta:', fmt(data.sales?.tarjeta))}
+  ${row('Transferencia:', fmt(data.sales?.transferencia))}
+  ${(data.sales?.mixto || 0) > 0 ? row('Mixto:', fmt(data.sales?.mixto)) : ''}
+  <div class="total"><span>TOTAL VENTAS</span><span>${fmt(data.sales?.total)}</span></div>
+
+  ${section('POR CAJERO')}
+  ${cashierRows || '<div class="note">Sin datos</div>'}
+
+  ${section('VENTAS POR DEPTO')}
+  ${catVentasRows || '<div class="note">Sin datos</div>'}
+
+  ${section('GANANCIA POR DEPTO')}
+  ${catGananciaRows || '<div class="note">Sin datos</div>'}
+  <div class="total"><span>UTILIDAD TOTAL</span><span>${fmt(data.utility || 0)}</span></div>
+
+  ${section('ENTRADAS EFECTIVO')}
+  ${entradaRows}
+  <div class="total"><span>TOTAL ENTRADAS</span><span>${fmt(data.entradas || 0)}</span></div>
+
+  ${section('SALIDAS EFECTIVO')}
+  ${salidaRows}
+  <div class="total"><span>TOTAL SALIDAS</span><span>${fmt(data.salidas || 0)}</span></div>
+
+  ${section('RESUMEN CAJA')}
+  ${row('Ef. inicial (todos los turnos):', fmt(data.openingCash || 0))}
+  ${row('Ventas efectivo:', fmt(data.sales?.efectivo))}
+  ${row('+ Entradas:', fmt(data.entradas || 0))}
+  ${row('- Salidas:', fmt(data.salidas || 0))}
+  <div class="total"><span>ESPERADO EN CAJA</span><span>${fmt(data.expectedCash || 0)}</span></div>
+
+  <div class="divider"></div>
+  <div class="note">${new Date().toLocaleString('es-MX')}</div>
+</body></html>`
 }

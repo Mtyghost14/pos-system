@@ -11,9 +11,12 @@ const today = () => new Date().toISOString().slice(0, 10)
 
 type Tab = 'catalogo' | 'agregar' | 'modificar' | 'eliminar' | 'categorias' | 'ventas' | 'promociones' | 'importar' | 'exportar' | 'etiquetas'
 
+const CASHIER_TABS: Tab[] = ['agregar', 'categorias', 'etiquetas']
+
 export default function Products() {
   const { user } = useAuthStore()
-  const [tab, setTab] = useState<Tab>('catalogo')
+  const isAdmin = user?.role === 'admin'
+  const [tab, setTab] = useState<Tab>(isAdmin ? 'catalogo' : 'agregar')
   const [products, setProducts] = useState<Product[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(false)
@@ -39,7 +42,7 @@ export default function Products() {
     setCategories(res)
   }
 
-  const tabs: { id: Tab; label: string }[] = [
+  const allTabs: { id: Tab; label: string }[] = [
     { id: 'catalogo', label: 'Catálogo' },
     { id: 'agregar', label: 'Agregar Producto' },
     { id: 'modificar', label: 'Modificar' },
@@ -51,6 +54,7 @@ export default function Products() {
     { id: 'exportar', label: 'Exportar' },
     { id: 'etiquetas', label: 'Etiquetas' },
   ]
+  const tabs = isAdmin ? allTabs : allTabs.filter(t => CASHIER_TABS.includes(t.id))
 
   return (
     <PageShell
@@ -1137,54 +1141,66 @@ function toAscii(text: string): string {
     .replace(/[^\x00-\x7E]/g, '?')   // replace anything still non-ASCII with ?
 }
 
+type LabelSettings = { showPrice: boolean; showBarcode: boolean; fontSize: string }
+
 // ZPL generator — pure text, no DOM required
 // Layout (top→bottom): name, barcode, code number, price
-function buildZPL(items: LabelItem[], size: LabelSize): string {
+function buildZPL(items: LabelItem[], size: LabelSize, settings: LabelSettings = { showPrice: true, showBarcode: true, fontSize: 'medium' }): string {
   const { wDots, hDots } = LABEL_SIZES[size]
+  const fontMult = settings.fontSize === 'small' ? 0.8 : settings.fontSize === 'large' ? 1.25 : 1.0
 
-  // Proportional layout
-  const nameY     = 6
-  const nameFontH = Math.round(hDots * 0.18)   // ~18% of height
+  // Proportional layout — stack only visible elements
+  let curY = 6
+
+  const nameFontH = Math.round(hDots * 0.18 * fontMult)
   const nameFontW = Math.round(nameFontH * 0.7)
   const nameLines = 2
-  const nameBlockH = nameFontH * nameLines + 4
+  const nameY     = curY
+  curY += nameFontH * nameLines + 6
 
-  const barcodeY  = nameY + nameBlockH + 4
-  const barcodeH  = Math.round(hDots * 0.38)
+  const barcodeY  = curY
+  const barcodeH  = settings.showBarcode ? Math.round(hDots * 0.38) : 0
+  if (settings.showBarcode) curY += barcodeH + 2
 
-  const codeY     = barcodeY + barcodeH + 4
-  const codeFontH = Math.round(hDots * 0.10)
+  const codeFontH = Math.round(hDots * 0.10 * fontMult)
   const codeFontW = Math.round(codeFontH * 0.65)
+  const codeY     = curY
+  curY += codeFontH + 6
 
-  const priceY    = codeY + codeFontH + 6
-  const priceFontH = Math.round(hDots * 0.15)
+  const priceFontH = Math.round(hDots * 0.15 * fontMult)
   const priceFontW = Math.round(priceFontH * 0.75)
+  const priceY    = curY
 
   return items.flatMap(item =>
     Array.from({ length: item.qty }, () => {
       const price = `$${(item.product.price || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
-      // Normalize to ASCII so accented chars (ó,é,ñ,etc.) print correctly
       const rawName = toAscii(item.label)
       const charsPerLine = Math.floor(wDots / (nameFontW * 0.6))
       const name = rawName.length > charsPerLine * 2
         ? rawName.slice(0, charsPerLine * 2 - 1) + '.'
         : rawName
 
-      return [
+      const lines = [
         '^XA',
         '^MMT',
         `^PW${wDots}`,
         `^LL${hDots}`,
-        // Product name — centered, up to 2 lines
+        // Product name — always shown, centered, up to 2 lines
         `^FO0,${nameY}^FB${wDots},${nameLines},2,C^A0N,${nameFontH},${nameFontW}^FD${name}^FS`,
-        // Code128 barcode — centered (small left margin, fills width)
-        `^FO12,${barcodeY}^BY2^BCN,${barcodeH},N,N,N^FD${item.code}^FS`,
-        // Barcode digits — centered
-        `^FO0,${codeY}^FB${wDots},1,,C^A0N,${codeFontH},${codeFontW}^FD${item.code}^FS`,
-        // Price — centered, large
-        `^FO0,${priceY}^FB${wDots},1,,C^A0N,${priceFontH},${priceFontW}^FD${price}^FS`,
-        '^XZ',
-      ].join('\n')
+      ]
+
+      if (settings.showBarcode) {
+        lines.push(`^FO12,${barcodeY}^BY2^BCN,${barcodeH},N,N,N^FD${item.code}^FS`)
+      }
+      // Always show the code number (small text)
+      lines.push(`^FO0,${codeY}^FB${wDots},1,,C^A0N,${codeFontH},${codeFontW}^FD${item.code}^FS`)
+
+      if (settings.showPrice) {
+        lines.push(`^FO0,${priceY}^FB${wDots},1,,C^A0N,${priceFontH},${priceFontW}^FD${price}^FS`)
+      }
+
+      lines.push('^XZ')
+      return lines.join('\n')
     })
   ).join('\n')
 }
@@ -1215,12 +1231,18 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
   const [printing, setPrinting] = useState(false)
   const [printMsg, setPrintMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [zebraPrinter, setZebraPrinter] = useState('')
+  const [labelSettings, setLabelSettings] = useState({ showPrice: true, showBarcode: true, fontSize: 'medium' })
   const searchRef = useRef<HTMLInputElement>(null)
 
-  // Load Zebra printer name from settings on mount
+  // Load label settings from DB on mount
   useEffect(() => {
     window.api.getSettings().then((s: any) => {
       setZebraPrinter(s?.label_printer?.trim() || '')
+      setLabelSettings({
+        showPrice:   s?.label_show_price   !== '0',
+        showBarcode: s?.label_show_barcode !== '0',
+        fontSize:    s?.label_font_size    || 'medium',
+      })
     })
   }, [])
 
@@ -1288,7 +1310,7 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
     }
     setPrinting(true)
     setPrintMsg(null)
-    const zpl = buildZPL(items, size)
+    const zpl = buildZPL(items, size, labelSettings)
     const res = await (window.api as any).printZPL({ zpl, printerName })
     setPrinting(false)
     if (res.success) {
@@ -1303,12 +1325,12 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
   const previewRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (!previewRef.current || !previewItem) return
+    if (!previewRef.current || !previewItem || !labelSettings.showBarcode) return
     const { hMm } = LABEL_SIZES[size]
-    const svgStr = generateBarcodeSVG(previewItem.code, Math.round(hMm * 2.2))
+    const svgStr = generateBarcodeSVG(previewItem.code, Math.round(hMm * 1.5))
     const el = previewRef.current.querySelector('.preview-barcode')
     if (el) el.innerHTML = svgStr
-  }, [previewItem, size])
+  }, [previewItem, size, labelSettings])
 
   return (
     <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', maxWidth: 860 }}>
@@ -1468,22 +1490,33 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
-                justifyContent: 'center',
-                padding: '6px 8px 4px',
+                justifyContent: 'space-between',
+                padding: '5px 6px',
                 background: '#fff',
                 overflow: 'hidden',
                 margin: '0 auto',
               }}
             >
-              <div className="preview-barcode"
-                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', overflow: 'hidden' }}
-              />
-              <div style={{ fontSize: 10, fontFamily: 'monospace', letterSpacing: '0.03em', fontWeight: 700, marginTop: 3, textAlign: 'center', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
+              {/* 1. Name — top */}
+              <div style={{ fontSize: 9, fontWeight: 900, textAlign: 'center', color: '#000', width: '100%', lineHeight: 1.2, overflow: 'hidden', maxHeight: '2.6em' }}>
+                {previewItem.label.length > 40 ? previewItem.label.slice(0, 39) + '…' : previewItem.label}
+              </div>
+              {/* 2. Barcode — middle */}
+              {labelSettings.showBarcode && (
+                <div className="preview-barcode"
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', overflow: 'hidden', padding: '2px 0' }}
+                />
+              )}
+              {/* 3. Code number */}
+              <div style={{ fontSize: 8, fontFamily: 'monospace', fontWeight: 700, textAlign: 'center', color: '#000', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
                 {previewItem.code}
               </div>
-              <div style={{ fontSize: 9, color: '#444', textAlign: 'center', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
-                {previewItem.label.length > 32 ? previewItem.label.slice(0, 31) + '…' : previewItem.label}
-              </div>
+              {/* 4. Price */}
+              {labelSettings.showPrice && (
+                <div style={{ fontSize: 10, fontWeight: 900, textAlign: 'center', color: '#000' }}>
+                  ${(previewItem.product.price || 0).toFixed(2)}
+                </div>
+              )}
             </div>
           ) : (
             <div style={{

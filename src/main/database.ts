@@ -271,6 +271,12 @@ function seedData() {
     ['pac_url', ''],
     ['pac_user', ''],
     ['pac_password', ''],
+    ['receipt_font_size', 'medium'],
+    ['receipt_show_folio', '1'],
+    ['receipt_show_cashier', '1'],
+    ['label_font_size', 'medium'],
+    ['label_show_price', '1'],
+    ['label_show_barcode', '1'],
   ]
 
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)')

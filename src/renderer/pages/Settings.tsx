@@ -5,7 +5,7 @@ import type { User } from '../types'
 import Modal from '../components/Modal'
 import PageShell from '../components/PageShell'
 
-type Tab = 'tienda' | 'impresora' | 'facturacion' | 'usuarios' | 'respaldos'
+type Tab = 'tienda' | 'impresora' | 'tickets' | 'facturacion' | 'usuarios' | 'respaldos'
 
 export default function Settings() {
   const [tab, setTab] = useState<Tab>('tienda')
@@ -19,6 +19,7 @@ export default function Settings() {
   const tabs: { id: Tab; label: string }[] = [
     { id: 'tienda', label: 'Información de Tienda' },
     { id: 'impresora', label: 'Impresora Térmica' },
+    { id: 'tickets', label: 'Tickets y Etiquetas' },
     { id: 'facturacion', label: 'Facturación SAT' },
     { id: 'usuarios', label: 'Usuarios' },
     { id: 'respaldos', label: 'Respaldos' },
@@ -35,6 +36,7 @@ export default function Settings() {
     >
       {tab === 'tienda' && <StoreSettings showMsg={showMsg} />}
       {tab === 'impresora' && <PrinterSettings showMsg={showMsg} />}
+      {tab === 'tickets' && <TicketsTab showMsg={showMsg} />}
       {tab === 'facturacion' && <InvoiceSettings showMsg={showMsg} />}
       {tab === 'usuarios' && <UsersSettings showMsg={showMsg} />}
       {tab === 'respaldos' && <BackupsTab showMsg={showMsg} />}
@@ -512,6 +514,239 @@ function UsersSettings({ showMsg }: any) {
           </div>
         </Modal>
       )}
+    </div>
+  )
+}
+
+function TicketsTab({ showMsg }: any) {
+  const { settings, loadSettings } = useSettingsStore()
+  const [fontSize, setFontSize] = useState('medium')
+  const [showFolio, setShowFolio] = useState(true)
+  const [showCashier, setShowCashier] = useState(true)
+  const [labelFontSize, setLabelFontSize] = useState('medium')
+  const [labelShowPrice, setLabelShowPrice] = useState(true)
+  const [labelShowBarcode, setLabelShowBarcode] = useState(true)
+
+  useEffect(() => {
+    if (settings) {
+      setFontSize(settings.receipt_font_size || 'medium')
+      setShowFolio(settings.receipt_show_folio !== '0')
+      setShowCashier(settings.receipt_show_cashier !== '0')
+      setLabelFontSize(settings.label_font_size || 'medium')
+      setLabelShowPrice(settings.label_show_price !== '0')
+      setLabelShowBarcode(settings.label_show_barcode !== '0')
+    }
+  }, [settings])
+
+  const handleSave = async () => {
+    await window.api.saveSettings({
+      receipt_font_size: fontSize,
+      receipt_show_folio: showFolio ? '1' : '0',
+      receipt_show_cashier: showCashier ? '1' : '0',
+      label_font_size: labelFontSize,
+      label_show_price: labelShowPrice ? '1' : '0',
+      label_show_barcode: labelShowBarcode ? '1' : '0',
+    })
+    await loadSettings()
+    showMsg('Configuración de tickets guardada')
+  }
+
+  // Preview font sizes
+  const previewBase = fontSize === 'small' ? 7 : fontSize === 'large' ? 10 : 8.5
+  const storeName = settings?.store_name || 'Mi Tienda'
+  const storeAddress = settings?.store_address || 'Calle Principal #123'
+  const footer = settings?.receipt_footer || 'Gracias por su compra'
+
+  // Label preview font
+  const labelBase = labelFontSize === 'small' ? 7 : labelFontSize === 'large' ? 10 : 8.5
+
+  const toggle = (val: boolean, set: (v: boolean) => void, label: string) => (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', padding: '10px 14px', borderRadius: 12, background: 'var(--nm-bg)', border: '1.5px solid var(--nm-separator)' }}>
+      <div
+        onClick={() => set(!val)}
+        style={{
+          width: 36, height: 20, borderRadius: 10, flexShrink: 0,
+          background: val ? 'var(--nm-accent)' : 'var(--nm-separator)',
+          position: 'relative', transition: 'background 0.2s', cursor: 'pointer',
+        }}
+      >
+        <div style={{
+          position: 'absolute', top: 2, left: val ? 18 : 2, width: 16, height: 16,
+          borderRadius: '50%', background: 'white', transition: 'left 0.2s',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+        }} />
+      </div>
+      <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--nm-text)' }}>{label}</span>
+    </label>
+  )
+
+  return (
+    <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+      {/* Config panel */}
+      <div style={{ flex: '1 1 300px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+        {/* Receipt config */}
+        <div style={{ background: 'var(--nm-bg)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 900, color: 'var(--nm-text)' }}>🧾 Ticket de Venta</div>
+
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+              Tamaño de letra
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {(['small', 'medium', 'large'] as const).map(size => (
+                <button
+                  key={size}
+                  onClick={() => setFontSize(size)}
+                  style={{
+                    flex: 1, padding: '10px 0', borderRadius: 12, fontSize: 12, fontWeight: 800,
+                    border: `2px solid ${fontSize === size ? 'var(--nm-accent)' : 'var(--nm-separator)'}`,
+                    background: fontSize === size ? 'rgba(255,45,85,0.07)' : 'var(--nm-bg)',
+                    color: fontSize === size ? 'var(--nm-accent)' : 'var(--nm-text-muted)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {size === 'small' ? 'Pequeño' : size === 'medium' ? 'Mediano' : 'Grande'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {toggle(showFolio, setShowFolio, 'Mostrar número de folio')}
+            {toggle(showCashier, setShowCashier, 'Mostrar nombre de cajero')}
+          </div>
+
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nm-text-muted)', padding: '8px 12px', background: 'rgba(255,45,85,0.04)', borderRadius: 8, lineHeight: 1.5 }}>
+            El mensaje al pie del ticket se configura en <b>Información de Tienda</b> → "Mensaje en pie de ticket"
+          </div>
+        </div>
+
+        {/* Label config */}
+        <div style={{ background: 'var(--nm-bg)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 22, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 900, color: 'var(--nm-text)' }}>🏷️ Etiquetas de Producto</div>
+
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+              Tamaño de letra
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {(['small', 'medium', 'large'] as const).map(size => (
+                <button
+                  key={size}
+                  onClick={() => setLabelFontSize(size)}
+                  style={{
+                    flex: 1, padding: '10px 0', borderRadius: 12, fontSize: 12, fontWeight: 800,
+                    border: `2px solid ${labelFontSize === size ? 'var(--nm-accent)' : 'var(--nm-separator)'}`,
+                    background: labelFontSize === size ? 'rgba(255,45,85,0.07)' : 'var(--nm-bg)',
+                    color: labelFontSize === size ? 'var(--nm-accent)' : 'var(--nm-text-muted)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {size === 'small' ? 'Pequeño' : size === 'medium' ? 'Mediano' : 'Grande'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {toggle(labelShowPrice, setLabelShowPrice, 'Mostrar precio')}
+            {toggle(labelShowBarcode, setLabelShowBarcode, 'Mostrar código de barras')}
+          </div>
+        </div>
+
+        <button onClick={handleSave} className="nm-btn-accent" style={{ padding: '14px', fontSize: 14, fontWeight: 800 }}>
+          Guardar Configuración
+        </button>
+      </div>
+
+      {/* Previews */}
+      <div style={{ flex: '1 1 260px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+        {/* Receipt preview */}
+        <div style={{ background: 'var(--nm-bg)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 18 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>
+            Vista previa — Ticket
+          </div>
+          <div style={{
+            background: '#fff', borderRadius: 8, padding: '12px 10px', maxWidth: 200, margin: '0 auto',
+            fontFamily: "'Courier New', monospace", color: '#000',
+            boxShadow: '0 2px 12px rgba(0,0,0,0.12)',
+            fontSize: previewBase, fontWeight: 700, lineHeight: 1.4,
+          }}>
+            <div style={{ fontSize: previewBase + 2, fontWeight: 900, textAlign: 'center', marginBottom: 2 }}>{storeName}</div>
+            <div style={{ fontSize: previewBase - 1, textAlign: 'center', color: '#555' }}>{storeAddress}</div>
+            <div style={{ borderTop: '1px solid #000', margin: '4px 0' }} />
+            <div>Fecha: 13/04/2026</div>
+            {showFolio && <div>Folio: <b>VTA-0042</b></div>}
+            {showCashier && <div>Cajero: Admin</div>}
+            <div style={{ borderTop: '1px solid #000', margin: '4px 0' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Coca-Cola 600ml</span><span></span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 4 }}>
+              <span style={{ color: '#555' }}>2x$18.00</span><span>$36.00</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Sabritas 45g</span><span></span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 4 }}>
+              <span style={{ color: '#555' }}>1x$16.00</span><span>$16.00</span>
+            </div>
+            <div style={{ borderTop: '1px solid #000', margin: '4px 0' }} />
+            <div style={{ fontSize: previewBase + 2, fontWeight: 900, display: 'flex', justifyContent: 'space-between' }}>
+              <span>TOTAL</span><span>$52.00</span>
+            </div>
+            <div style={{ borderTop: '1px solid #000', margin: '4px 0' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Efectivo</span><span>$100.00</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 900, color: '#1a7a3a' }}><span>CAMBIO</span><span>$48.00</span></div>
+            <div style={{ borderTop: '1px solid #000', margin: '4px 0' }} />
+            <div style={{ textAlign: 'center', fontSize: previewBase - 1 }}>{footer}</div>
+          </div>
+        </div>
+
+        {/* Label preview */}
+        <div style={{ background: 'var(--nm-bg)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 18 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12 }}>
+            Vista previa — Etiqueta (50×32mm)
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center' }}>
+            <div style={{
+              background: '#fff', borderRadius: 4, border: '1px solid #ccc',
+              width: 160, height: 102,
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'space-between', padding: '5px 8px',
+              overflow: 'hidden',
+            }}>
+              {/* 1. Name — top, matches ZPL */}
+              <div style={{ fontSize: labelBase + 1, fontWeight: 900, textAlign: 'center', color: '#000', width: '100%', lineHeight: 1.2, overflow: 'hidden' }}>
+                Coca-Cola 600ml
+              </div>
+              {/* 2. Barcode — center */}
+              {labelShowBarcode && (
+                <div style={{ display: 'flex', gap: '1px', alignItems: 'flex-end', justifyContent: 'center', flex: 1, padding: '2px 0' }}>
+                  {[2,1,1,2,1,2,1,1,2,1,1,2,1,2,2,1,1,2,1,1,2,1,2,1,2,1,1,2,1,1,2,2,1,2,1,1,2].map((w, i) => (
+                    <div key={i} style={{ width: w, height: 28, background: '#000', flexShrink: 0 }} />
+                  ))}
+                </div>
+              )}
+              {/* 3. Code number */}
+              <div style={{ fontSize: labelBase - 1, fontFamily: 'monospace', fontWeight: 700, color: '#000', textAlign: 'center' }}>
+                7501055365082
+              </div>
+              {/* 4. Price — matches ZPL */}
+              {labelShowPrice && (
+                <div style={{ fontSize: labelBase + 2, fontWeight: 900, color: '#000', textAlign: 'center' }}>
+                  $18.00
+                </div>
+              )}
+            </div>
+          </div>
+          <div style={{ textAlign: 'center', fontSize: 10, color: 'var(--nm-text-muted)', fontWeight: 600, marginTop: 8 }}>
+            50mm × 32mm · ZPL · 203 DPI
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
