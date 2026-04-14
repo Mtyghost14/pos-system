@@ -1,0 +1,1424 @@
+import { ipcMain, dialog, app, BrowserWindow } from 'electron'
+import { getDb } from './database'
+import bcrypt from 'bcryptjs'
+import { join } from 'path'
+import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'fs'
+import { tmpdir } from 'os'
+import { exec } from 'child_process'
+import ExcelJS from 'exceljs'
+
+function generateFolio(): string {
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const date = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
+  const time = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  const rand = Math.floor(Math.random() * 1000).toString().padStart(3, '0')
+  return `F${date}${time}${rand}`
+}
+
+export function registerIpcHandlers() {
+  const db = getDb()
+
+  // ─── AUTH ───────────────────────────────────────────────────────────────────
+  ipcMain.handle('auth:login', (_, username: string, password: string) => {
+    const user = db.prepare('SELECT * FROM users WHERE username = ? AND active = 1').get(username) as any
+    if (!user) return { success: false, message: 'Usuario no encontrado' }
+    const valid = bcrypt.compareSync(password, user.password_hash)
+    if (!valid) return { success: false, message: 'Contraseña incorrecta' }
+    const { password_hash, ...safeUser } = user
+    return { success: true, user: safeUser }
+  })
+
+  ipcMain.handle('auth:getUsers', () => {
+    return db.prepare('SELECT id, username, plain_password, role, name, active, created_at FROM users ORDER BY name').all()
+  })
+
+  ipcMain.handle('auth:createUser', (_, data: any) => {
+    const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(data.username)
+    if (exists) return { success: false, message: 'El nombre de usuario ya existe' }
+    const hash = bcrypt.hashSync(data.password, 10)
+    const res = db.prepare('INSERT INTO users (username, password_hash, plain_password, role, name) VALUES (?,?,?,?,?)').run(
+      data.username, hash, data.password, data.role, data.name
+    )
+    return { success: true, id: res.lastInsertRowid }
+  })
+
+  ipcMain.handle('auth:updateUser', (_, data: any) => {
+    if (data.password) {
+      const hash = bcrypt.hashSync(data.password, 10)
+      db.prepare('UPDATE users SET username=?, password_hash=?, plain_password=?, role=?, name=?, active=? WHERE id=?').run(
+        data.username, hash, data.password, data.role, data.name, data.active ? 1 : 0, data.id
+      )
+    } else {
+      db.prepare('UPDATE users SET username=?, role=?, name=?, active=? WHERE id=?').run(
+        data.username, data.role, data.name, data.active ? 1 : 0, data.id
+      )
+    }
+    return { success: true }
+  })
+
+  ipcMain.handle('auth:deleteUser', (_, id: number) => {
+    db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(id)
+    return { success: true }
+  })
+
+  // ─── CATEGORIES ─────────────────────────────────────────────────────────────
+  ipcMain.handle('categories:getAll', () => {
+    return db.prepare('SELECT * FROM categories ORDER BY name').all()
+  })
+
+  ipcMain.handle('categories:create', (_, name: string) => {
+    const exists = db.prepare('SELECT id FROM categories WHERE name = ?').get(name)
+    if (exists) return { success: false, message: 'La categoría ya existe' }
+    const res = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name)
+    return { success: true, id: res.lastInsertRowid }
+  })
+
+  ipcMain.handle('categories:update', (_, id: number, name: string) => {
+    db.prepare('UPDATE categories SET name = ? WHERE id = ?').run(name, id)
+    return { success: true }
+  })
+
+  ipcMain.handle('categories:delete', (_, id: number) => {
+    const used = db.prepare('SELECT id FROM products WHERE category_id = ? AND active = 1 LIMIT 1').get(id)
+    if (used) return { success: false, message: 'La categoría tiene productos activos' }
+    db.prepare('DELETE FROM categories WHERE id = ?').run(id)
+    return { success: true }
+  })
+
+  // ─── PRODUCTS ───────────────────────────────────────────────────────────────
+  ipcMain.handle('products:getAll', (_, query?: string) => {
+    if (query) {
+      return db.prepare(`
+        SELECT p.*, c.name as category_name
+        FROM products p LEFT JOIN categories c ON p.category_id = c.id
+        WHERE p.active = 1 AND (p.name LIKE ? OR p.code LIKE ?)
+        ORDER BY p.name LIMIT 50
+      `).all(`%${query}%`, `%${query}%`)
+    }
+    return db.prepare(`
+      SELECT p.*, c.name as category_name
+      FROM products p LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.active = 1 ORDER BY p.name
+    `).all()
+  })
+
+  ipcMain.handle('products:getByCode', (_, code: string) => {
+    // Check main code first, then extra barcodes
+    let product = db.prepare(`
+      SELECT p.*, c.name as category_name
+      FROM products p LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.code = ? AND p.active = 1
+    `).get(code) as any
+
+    if (!product) {
+      // Try product_barcodes table
+      const alias = db.prepare(`
+        SELECT p.*, c.name as category_name
+        FROM product_barcodes pb
+        JOIN products p ON pb.product_id = p.id
+        LEFT JOIN categories c ON p.category_id = c.id
+        WHERE pb.code = ? AND p.active = 1
+      `).get(code) as any
+      if (alias) product = alias
+    }
+
+    if (!product) return null
+
+    // check promotions
+    const now = new Date().toISOString().slice(0, 10)
+    const promo = db.prepare(`
+      SELECT * FROM promotions
+      WHERE product_id = ? AND active = 1
+      AND start_date <= ? AND end_date >= ?
+      LIMIT 1
+    `).get(product.id, now, now) as any
+    if (promo) {
+      if (promo.discount_type === 'percentage') {
+        product.promo_price = product.price * (1 - promo.discount_value / 100)
+      } else {
+        product.promo_price = product.price - promo.discount_value
+      }
+      product.promo_name = promo.name
+    }
+    return product
+  })
+
+  ipcMain.handle('products:create', (_, data: any) => {
+    const exists = db.prepare('SELECT id FROM products WHERE code = ?').get(data.code)
+    if (exists) return { success: false, message: 'El código ya existe' }
+    const res = db.prepare(`
+      INSERT INTO products (code, name, category_id, cost, price, stock, min_stock)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(data.code, data.name, data.category_id, data.cost, data.price, data.stock || 0, data.min_stock || 0)
+
+    if (data.stock > 0) {
+      db.prepare(`
+        INSERT INTO inventory_movements (product_id, type, quantity_before, quantity_change, quantity_after, notes, cashier_id)
+        VALUES (?,?,?,?,?,?,?)
+      `).run(res.lastInsertRowid, 'recepcion', 0, data.stock, data.stock, 'Stock inicial', data.cashier_id || 1)
+    }
+    return { success: true, id: res.lastInsertRowid }
+  })
+
+  ipcMain.handle('products:update', (_, data: any) => {
+    // If code is being changed, check it's not taken by another product
+    if (data.code) {
+      const conflict = db.prepare('SELECT id FROM products WHERE code = ? AND id != ?').get(data.code, data.id) as any
+      if (conflict) return { success: false, message: 'Ese código ya está en uso por otro producto' }
+      const conflictBarcode = db.prepare('SELECT id FROM product_barcodes WHERE code = ? AND product_id != ?').get(data.code, data.id) as any
+      if (conflictBarcode) return { success: false, message: 'Ese código ya está registrado como código adicional de otro producto' }
+      db.prepare(`
+        UPDATE products SET code=?, name=?, category_id=?, cost=?, price=?, min_stock=?, updated_at=datetime('now','localtime')
+        WHERE id=?
+      `).run(data.code, data.name, data.category_id, data.cost, data.price, data.min_stock, data.id)
+    } else {
+      db.prepare(`
+        UPDATE products SET name=?, category_id=?, cost=?, price=?, min_stock=?, updated_at=datetime('now','localtime')
+        WHERE id=?
+      `).run(data.name, data.category_id, data.cost, data.price, data.min_stock, data.id)
+    }
+    return { success: true }
+  })
+
+  // ── Extra barcodes ──────────────────────────────────────────────────────────
+  ipcMain.handle('barcodes:getByProduct', (_, productId: number) => {
+    return db.prepare('SELECT * FROM product_barcodes WHERE product_id = ? ORDER BY id').all(productId)
+  })
+
+  ipcMain.handle('barcodes:add', (_, data: { product_id: number; code: string; label?: string }) => {
+    const conflict = db.prepare('SELECT id FROM products WHERE code = ?').get(data.code) as any
+    if (conflict) return { success: false, message: 'Ese código ya es el código principal de un producto' }
+    const conflictBarcode = db.prepare('SELECT id FROM product_barcodes WHERE code = ?').get(data.code) as any
+    if (conflictBarcode) return { success: false, message: 'Ese código ya está registrado en otro producto' }
+    db.prepare('INSERT INTO product_barcodes (product_id, code, label) VALUES (?,?,?)').run(data.product_id, data.code, data.label || null)
+    return { success: true }
+  })
+
+  ipcMain.handle('barcodes:delete', (_, id: number) => {
+    db.prepare('DELETE FROM product_barcodes WHERE id = ?').run(id)
+    return { success: true }
+  })
+
+  ipcMain.handle('products:delete', (_, id: number) => {
+    db.prepare('UPDATE products SET active = 0 WHERE id = ?').run(id)
+    return { success: true }
+  })
+
+  ipcMain.handle('products:import', (_, rows: any[]) => {
+    const insert = db.prepare(`
+      INSERT INTO products (code, name, category_id, cost, price, stock, min_stock)
+      VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(code) DO UPDATE SET
+        name=excluded.name, cost=excluded.cost, price=excluded.price, min_stock=excluded.min_stock,
+        updated_at=datetime('now','localtime')
+    `)
+    let imported = 0, updated = 0
+    for (const row of rows) {
+      const catRow = db.prepare('SELECT id FROM categories WHERE name = ?').get(row.category) as any
+      const catId = catRow?.id || null
+      const exists = db.prepare('SELECT id FROM products WHERE code = ?').get(row.code)
+      insert.run(row.code, row.name, catId, row.cost || 0, row.price || 0, row.stock || 0, row.min_stock || 0)
+      if (exists) updated++; else imported++
+    }
+    return { success: true, imported, updated }
+  })
+
+  ipcMain.handle('products:export', () => {
+    return db.prepare(`
+      SELECT p.code, p.name, c.name as category, p.cost, p.price, p.stock, p.min_stock, p.active
+      FROM products p LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.active = 1 ORDER BY p.name
+    `).all()
+  })
+
+  // ─── SHIFTS ─────────────────────────────────────────────────────────────────
+  ipcMain.handle('shifts:getActive', (_, cashierId: number) => {
+    return db.prepare("SELECT * FROM shifts WHERE cashier_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(cashierId)
+  })
+
+  ipcMain.handle('shifts:open', (_, data: any) => {
+    // Close any previously open shifts for this cashier
+    db.prepare("UPDATE shifts SET status='closed', ended_at=datetime('now','localtime') WHERE cashier_id=? AND status='open'").run(data.cashier_id)
+    const res = db.prepare('INSERT INTO shifts (cashier_id, opening_cash) VALUES (?,?)').run(data.cashier_id, data.opening_cash)
+    return { success: true, id: res.lastInsertRowid }
+  })
+
+  ipcMain.handle('shifts:close', (_, data: any) => {
+    const summary = getShiftSummaryData(data.shift_id)
+    db.prepare(`
+      UPDATE shifts SET status='closed', ended_at=datetime('now','localtime'),
+      closing_cash=?, expected_cash=? WHERE id=?
+    `).run(data.closing_cash, summary.expected_cash, data.shift_id)
+    return { success: true, summary }
+  })
+
+  ipcMain.handle('shifts:getSummary', (_, shiftId: number) => {
+    return getShiftSummaryData(shiftId)
+  })
+
+  ipcMain.handle('shifts:getCashBalance', (_, shiftId: number) => {
+    const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(shiftId) as any
+    if (!shift) return 0
+    const cashSales = (db.prepare(`
+      SELECT COALESCE(SUM(total),0) as total FROM sales WHERE shift_id=? AND payment_type='efectivo'
+    `).get(shiftId) as any).total
+    const entradas = (db.prepare(`
+      SELECT COALESCE(SUM(amount),0) as total FROM cash_movements WHERE shift_id=? AND type='entrada'
+    `).get(shiftId) as any).total
+    const salidas = (db.prepare(`
+      SELECT COALESCE(SUM(amount),0) as total FROM cash_movements WHERE shift_id=? AND type='salida'
+    `).get(shiftId) as any).total
+    const devoluciones = (db.prepare(`
+      SELECT COALESCE(SUM(amount),0) as total FROM cash_movements WHERE shift_id=? AND type='devolucion'
+    `).get(shiftId) as any).total
+    return shift.opening_cash + cashSales + entradas - salidas - devoluciones
+  })
+
+  function getShiftSummaryData(shiftId: number) {
+    const shift = db.prepare(`
+      SELECT s.*, u.name as cashier_name FROM shifts s
+      JOIN users u ON s.cashier_id = u.id WHERE s.id = ?
+    `).get(shiftId) as any
+
+    const sales = db.prepare(`
+      SELECT
+        COUNT(*) as count,
+        COALESCE(SUM(total),0) as total,
+        COALESCE(SUM(cost_total),0) as cost_total,
+        COALESCE(SUM(CASE WHEN payment_type='efectivo' THEN total ELSE 0 END),0) as efectivo,
+        COALESCE(SUM(CASE WHEN payment_type='tarjeta' THEN total ELSE 0 END),0) as tarjeta,
+        COALESCE(SUM(CASE WHEN payment_type='transferencia' THEN total ELSE 0 END),0) as transferencia
+      FROM sales WHERE shift_id = ?
+    `).get(shiftId) as any
+
+    const movements = db.prepare(`
+      SELECT type, COALESCE(SUM(amount),0) as total
+      FROM cash_movements WHERE shift_id = ?
+      GROUP BY type
+    `).all(shiftId) as any[]
+
+    const entradas = movements.find(m => m.type === 'entrada')?.total || 0
+    const salidas = movements.find(m => m.type === 'salida')?.total || 0
+    const devoluciones = movements.find(m => m.type === 'devolucion')?.total || 0
+
+    const expected_cash = (shift?.opening_cash || 0) + sales.efectivo + entradas - salidas - devoluciones
+
+    const salesByCategory = db.prepare(`
+      SELECT c.name as category, SUM(si.quantity * si.unit_price) as total
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      JOIN products p ON si.product_id = p.id
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE s.shift_id = ?
+      GROUP BY c.name ORDER BY total DESC
+    `).all(shiftId)
+
+    const movementDetails = db.prepare(`
+      SELECT type, concept, amount FROM cash_movements WHERE shift_id = ? ORDER BY id ASC
+    `).all(shiftId) as any[]
+
+    return {
+      shift, sales, entradas, salidas, devoluciones, expected_cash, salesByCategory,
+      movementDetails,
+      utility: sales.total - sales.cost_total,
+    }
+  }
+
+  // ─── CASH MOVEMENTS ─────────────────────────────────────────────────────────
+  ipcMain.handle('cash:addMovement', (_, data: any) => {
+    const res = db.prepare(`
+      INSERT INTO cash_movements (shift_id, type, amount, concept, cashier_id)
+      VALUES (?,?,?,?,?)
+    `).run(data.shift_id, data.type, data.amount, data.concept, data.cashier_id)
+    return { success: true, id: res.lastInsertRowid }
+  })
+
+  ipcMain.handle('cash:getMovements', (_, shiftId: number) => {
+    return db.prepare(`
+      SELECT cm.*, u.name as cashier_name FROM cash_movements cm
+      LEFT JOIN users u ON cm.cashier_id = u.id
+      WHERE cm.shift_id = ? ORDER BY cm.timestamp DESC
+    `).all(shiftId)
+  })
+
+  // ─── SALES ──────────────────────────────────────────────────────────────────
+  ipcMain.handle('sales:create', (_, data: any) => {
+    const folio = generateFolio()
+
+    const saleStmt = db.prepare(`
+      INSERT INTO sales (folio, cashier_id, payment_type, total, cost_total, received_amount, change_amount, payment_details, shift_id)
+      VALUES (?,?,?,?,?,?,?,?,?)
+    `)
+
+    const itemStmt = db.prepare(`
+      INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, unit_cost, discount)
+      VALUES (?,?,?,?,?,?)
+    `)
+
+    const updateStockStmt = db.prepare(`
+      UPDATE products SET stock = stock - ?, updated_at = datetime('now','localtime') WHERE id = ?
+    `)
+
+    const invMovStmt = db.prepare(`
+      INSERT INTO inventory_movements (product_id, type, quantity_before, quantity_change, quantity_after, cashier_id, reference_id, notes)
+      VALUES (?,?,?,?,?,?,?,?)
+    `)
+
+    let costTotal = 0
+    for (const item of data.items) {
+      const p = db.prepare('SELECT cost, stock FROM products WHERE id = ?').get(item.product_id) as any
+      if (p) costTotal += (p.cost || 0) * item.quantity
+    }
+
+    // Determine effective payment type and cash amount
+    const paymentDetails: Record<string, number> = data.payment_details || {}
+    const hasMixed = Object.keys(paymentDetails).length > 1
+    const effectiveType = hasMixed ? 'mixto' : (data.payment_type || 'efectivo')
+    const cashAmount = paymentDetails['efectivo'] ?? (data.payment_type === 'efectivo' ? data.total : 0)
+    const detailsJson = hasMixed ? JSON.stringify(paymentDetails) : null
+
+    const tx = db.transaction(() => {
+      const saleRes = saleStmt.run(
+        folio, data.cashier_id, effectiveType, data.total, costTotal,
+        data.received_amount || data.total, data.change_amount || 0,
+        detailsJson, data.shift_id
+      )
+      const saleId = saleRes.lastInsertRowid
+
+      for (const item of data.items) {
+        const p = db.prepare('SELECT cost, stock FROM products WHERE id = ?').get(item.product_id) as any
+        itemStmt.run(saleId, item.product_id, item.quantity, item.unit_price, p?.cost || 0, item.discount || 0)
+
+        const stockBefore = p?.stock || 0
+        const stockAfter = stockBefore - item.quantity
+        updateStockStmt.run(item.quantity, item.product_id)
+        invMovStmt.run(item.product_id, 'venta', stockBefore, -item.quantity, stockAfter, data.cashier_id, saleId, `Venta ${folio}`)
+      }
+
+      // Record cash movement only for the efectivo portion
+      if (cashAmount > 0) {
+        db.prepare(`
+          INSERT INTO cash_movements (shift_id, type, amount, concept, cashier_id)
+          VALUES (?,?,?,?,?)
+        `).run(data.shift_id, 'venta', cashAmount, `Venta ${folio}`, data.cashier_id)
+      }
+
+      return saleId
+    })
+
+    const saleId = tx()
+    return { success: true, folio, id: saleId }
+  })
+
+  ipcMain.handle('sales:getAll', (_, filters: any) => {
+    let query = `
+      SELECT s.*, u.name as cashier_name FROM sales s
+      LEFT JOIN users u ON s.cashier_id = u.id
+      WHERE 1=1
+    `
+    const params: any[] = []
+
+    if (filters?.from) { query += ' AND DATE(s.timestamp) >= ?'; params.push(filters.from) }
+    if (filters?.to) { query += ' AND DATE(s.timestamp) <= ?'; params.push(filters.to) }
+    if (filters?.shift_id) { query += ' AND s.shift_id = ?'; params.push(filters.shift_id) }
+    if (filters?.cashier_id) { query += ' AND s.cashier_id = ?'; params.push(filters.cashier_id) }
+    query += ' ORDER BY s.timestamp DESC'
+    if (filters?.limit) { query += ` LIMIT ${filters.limit}` }
+
+    const sales = db.prepare(query).all(...params) as any[]
+
+    // If includeItems requested
+    if (filters?.includeItems) {
+      for (const sale of sales) {
+        sale.items = db.prepare(`
+          SELECT si.*, p.name as product_name, p.code as product_code, c.name as category_name
+          FROM sale_items si
+          JOIN products p ON si.product_id = p.id
+          LEFT JOIN categories c ON p.category_id = c.id
+          WHERE si.sale_id = ?
+        `).all(sale.id)
+      }
+    }
+    return sales
+  })
+
+  ipcMain.handle('sales:getById', (_, id: number) => {
+    const sale = db.prepare(`
+      SELECT s.*, u.name as cashier_name FROM sales s
+      LEFT JOIN users u ON s.cashier_id = u.id WHERE s.id = ?
+    `).get(id) as any
+    if (!sale) return null
+    sale.items = db.prepare(`
+      SELECT si.*, p.name as product_name, p.code as product_code
+      FROM sale_items si JOIN products p ON si.product_id = p.id
+      WHERE si.sale_id = ?
+    `).all(id)
+    return sale
+  })
+
+  ipcMain.handle('sales:cancel', (_, { sale_id, reason, cancelled_by }: { sale_id: number; reason: string; cancelled_by: number }) => {
+    const sale = db.prepare('SELECT * FROM sales WHERE id = ?').get(sale_id) as any
+    if (!sale) return { success: false, message: 'Venta no encontrada' }
+    if (sale.cancelled) return { success: false, message: 'Esta venta ya fue cancelada' }
+
+    const cancelSale = db.transaction(() => {
+      // Mark sale as cancelled
+      db.prepare(`
+        UPDATE sales SET cancelled=1, cancelled_at=datetime('now','localtime'),
+        cancelled_by=?, cancel_reason=? WHERE id=?
+      `).run(cancelled_by, reason || 'Error del cajero', sale_id)
+
+      // Restore stock for each item
+      const items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(sale_id) as any[]
+      for (const item of items) {
+        db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(item.quantity, item.product_id)
+      }
+
+      // If cash involved, record as devolucion to subtract from cash balance
+      const cashAmount = (() => {
+        if (sale.payment_type === 'efectivo') return sale.total
+        if (sale.payment_type === 'mixto' && sale.payment_details) {
+          try { return JSON.parse(sale.payment_details).efectivo || 0 } catch { return 0 }
+        }
+        return 0
+      })()
+
+      if (cashAmount > 0 && sale.shift_id) {
+        db.prepare(`
+          INSERT INTO cash_movements (shift_id, type, amount, concept, cashier_id)
+          VALUES (?, 'devolucion', ?, ?, ?)
+        `).run(sale.shift_id, cashAmount, `Cancelación ${sale.folio}`, cancelled_by)
+      }
+    })
+
+    try {
+      cancelSale()
+      return { success: true }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+
+  // ─── INVENTORY ──────────────────────────────────────────────────────────────
+  ipcMain.handle('inventory:adjust', (_, data: any) => {
+    const product = db.prepare('SELECT stock FROM products WHERE id = ?').get(data.product_id) as any
+    if (!product) return { success: false, message: 'Producto no encontrado' }
+
+    const before = product.stock
+    let after: number
+
+    if (data.mode === 'set') {
+      after = data.quantity
+    } else {
+      after = before + data.quantity
+    }
+
+    if (after < 0) return { success: false, message: 'El stock no puede ser negativo' }
+
+    const tx = db.transaction(() => {
+      db.prepare(`
+        UPDATE products SET stock = ?, cost = COALESCE(?, cost), price = COALESCE(?, price),
+        updated_at = datetime('now','localtime') WHERE id = ?
+      `).run(after, data.new_cost || null, data.new_price || null, data.product_id)
+
+      db.prepare(`
+        INSERT INTO inventory_movements (product_id, type, quantity_before, quantity_change, quantity_after, cashier_id, notes)
+        VALUES (?,?,?,?,?,?,?)
+      `).run(data.product_id, 'ajuste', before, after - before, after, data.cashier_id, data.notes)
+    })
+    tx()
+
+    return { success: true }
+  })
+
+  ipcMain.handle('inventory:getLowStock', () => {
+    return db.prepare(`
+      SELECT p.*, c.name as category_name FROM products p
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.active = 1 AND p.stock <= p.min_stock
+      ORDER BY (p.stock - p.min_stock) ASC
+    `).all()
+  })
+
+  ipcMain.handle('inventory:getReport', () => {
+    return db.prepare(`
+      SELECT p.code, p.name, c.name as category_name, p.stock, p.cost, p.price,
+             (p.stock * p.cost) as total_value
+      FROM products p LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.active = 1 ORDER BY p.name
+    `).all()
+  })
+
+  ipcMain.handle('inventory:getMovements', (_, filters: any) => {
+    let query = `
+      SELECT im.*, p.name as product_name, p.code as product_code,
+             c.name as category_name, u.name as cashier_name
+      FROM inventory_movements im
+      JOIN products p ON im.product_id = p.id
+      LEFT JOIN categories c ON p.category_id = c.id
+      LEFT JOIN users u ON im.cashier_id = u.id
+      WHERE 1=1
+    `
+    const params: any[] = []
+    if (filters?.product_id) { query += ' AND im.product_id = ?'; params.push(filters.product_id) }
+    if (filters?.type) { query += ' AND im.type = ?'; params.push(filters.type) }
+    if (filters?.from) { query += ' AND DATE(im.timestamp) >= ?'; params.push(filters.from) }
+    if (filters?.to) { query += ' AND DATE(im.timestamp) <= ?'; params.push(filters.to) }
+    query += ' ORDER BY im.timestamp DESC'
+    return db.prepare(query).all(...params)
+  })
+
+  // ─── PROMOTIONS ─────────────────────────────────────────────────────────────
+  ipcMain.handle('promotions:getAll', () => {
+    return db.prepare(`
+      SELECT pr.*, p.name as product_name, p.code as product_code
+      FROM promotions pr LEFT JOIN products p ON pr.product_id = p.id
+      ORDER BY pr.id DESC
+    `).all()
+  })
+
+  ipcMain.handle('promotions:create', (_, data: any) => {
+    const res = db.prepare(`
+      INSERT INTO promotions (name, product_id, discount_type, discount_value, start_date, end_date, active)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(data.name, data.product_id, data.discount_type, data.discount_value, data.start_date, data.end_date, data.active ? 1 : 0)
+    return { success: true, id: res.lastInsertRowid }
+  })
+
+  ipcMain.handle('promotions:update', (_, data: any) => {
+    db.prepare(`
+      UPDATE promotions SET name=?, product_id=?, discount_type=?, discount_value=?,
+      start_date=?, end_date=?, active=? WHERE id=?
+    `).run(data.name, data.product_id, data.discount_type, data.discount_value, data.start_date, data.end_date, data.active ? 1 : 0, data.id)
+    return { success: true }
+  })
+
+  ipcMain.handle('promotions:delete', (_, id: number) => {
+    db.prepare('DELETE FROM promotions WHERE id = ?').run(id)
+    return { success: true }
+  })
+
+  ipcMain.handle('promotions:getActiveForProduct', (_, productId: number) => {
+    const now = new Date().toISOString().slice(0, 10)
+    return db.prepare(`
+      SELECT * FROM promotions WHERE product_id = ? AND active = 1
+      AND start_date <= ? AND end_date >= ?
+    `).all(productId, now, now)
+  })
+
+  // ─── SUPPLIERS ──────────────────────────────────────────────────────────────
+  ipcMain.handle('suppliers:getAll', () => {
+    return db.prepare('SELECT * FROM suppliers ORDER BY name').all()
+  })
+
+  ipcMain.handle('suppliers:create', (_, data: any) => {
+    const res = db.prepare(`
+      INSERT INTO suppliers (name, contact_name, phone, email, address, products_supplied, notes)
+      VALUES (?,?,?,?,?,?,?)
+    `).run(data.name, data.contact_name, data.phone, data.email, data.address, data.products_supplied, data.notes)
+    return { success: true, id: res.lastInsertRowid }
+  })
+
+  ipcMain.handle('suppliers:update', (_, data: any) => {
+    db.prepare(`
+      UPDATE suppliers SET name=?, contact_name=?, phone=?, email=?, address=?, products_supplied=?, notes=?
+      WHERE id=?
+    `).run(data.name, data.contact_name, data.phone, data.email, data.address, data.products_supplied, data.notes, data.id)
+    return { success: true }
+  })
+
+  ipcMain.handle('suppliers:delete', (_, id: number) => {
+    db.prepare('DELETE FROM suppliers WHERE id = ?').run(id)
+    return { success: true }
+  })
+
+  // ─── REPORTS ────────────────────────────────────────────────────────────────
+  ipcMain.handle('reports:getDashboard', () => {
+    const todayStr = new Date().toISOString().slice(0, 10)
+    const yd = new Date(); yd.setDate(yd.getDate() - 1)
+    const yestStr = yd.toISOString().slice(0, 10)
+    const monthStart = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`
+    const lmEnd = new Date(new Date().getFullYear(), new Date().getMonth(), 0)
+    const lmStart = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1)
+    const iso = (d: Date) => d.toISOString().slice(0, 10)
+
+    const dayKpis = (from: string, to: string) => db.prepare(`
+      SELECT COALESCE(SUM(total),0) as sales, COALESCE(SUM(total-cost_total),0) as profit,
+             COUNT(*) as transactions, COALESCE(AVG(total),0) as avg_ticket,
+             COALESCE(SUM(total-cost_total)/NULLIF(SUM(total),0)*100,0) as margin
+      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+    `).get(from, to) as any
+
+    const today    = dayKpis(todayStr, todayStr)
+    const yesterday = dayKpis(yestStr, yestStr)
+    const thisMonth = dayKpis(monthStart, todayStr)
+    const lastMonth = dayKpis(iso(lmStart), iso(lmEnd))
+
+    const trend30 = db.prepare(`
+      SELECT DATE(timestamp) as date,
+             COALESCE(SUM(total),0) as total,
+             COALESCE(SUM(total-cost_total),0) as profit,
+             COUNT(*) as transactions
+      FROM sales
+      WHERE DATE(timestamp) >= DATE('now','-29 days')
+      GROUP BY DATE(timestamp) ORDER BY date
+    `).all()
+
+    // Fill missing days with zeros
+    const trendMap = new Map((trend30 as any[]).map((r: any) => [r.date, r]))
+    const trend: any[] = []
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i)
+      const key = iso(d)
+      trend.push(trendMap.get(key) || { date: key, total: 0, profit: 0, transactions: 0 })
+    }
+
+    const topToday = db.prepare(`
+      SELECT p.name, SUM(si.quantity) as qty, SUM(si.quantity*si.unit_price) as revenue
+      FROM sale_items si
+      JOIN sales s ON si.sale_id=s.id
+      JOIN products p ON si.product_id=p.id
+      WHERE DATE(s.timestamp)=?
+      GROUP BY p.id ORDER BY revenue DESC LIMIT 8
+    `).all(todayStr)
+
+    const recentSales = db.prepare(`
+      SELECT s.folio, s.timestamp, s.total, s.payment_type, u.name as cashier_name,
+             COUNT(si.id) as items
+      FROM sales s
+      LEFT JOIN users u ON s.cashier_id=u.id
+      LEFT JOIN sale_items si ON si.sale_id=s.id
+      WHERE DATE(s.timestamp)=?
+      GROUP BY s.id ORDER BY s.timestamp DESC LIMIT 10
+    `).all(todayStr)
+
+    const lowStock = db.prepare(`
+      SELECT id, code, name, stock, min_stock, price
+      FROM products WHERE stock <= min_stock AND active=1
+      ORDER BY (stock - min_stock) ASC LIMIT 15
+    `).all()
+
+    const byDayOfWeek = db.prepare(`
+      SELECT CAST(strftime('%w', timestamp) AS INTEGER) as dow,
+             COALESCE(SUM(total),0) as total, COUNT(*) as count
+      FROM sales
+      WHERE DATE(timestamp) >= DATE('now','-90 days')
+      GROUP BY dow ORDER BY dow
+    `).all()
+    const DOW_LABELS = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']
+    const dowFull = Array.from({ length: 7 }, (_, i) => {
+      const d = (byDayOfWeek as any[]).find((r: any) => r.dow === i)
+      return { dow: DOW_LABELS[i], total: d?.total || 0, count: d?.count || 0 }
+    })
+
+    const inventoryValue = db.prepare(`
+      SELECT COALESCE(SUM(stock*cost),0) as cost_value, COALESCE(SUM(stock*price),0) as sell_value,
+             COUNT(*) as total_products, SUM(CASE WHEN stock<=0 THEN 1 ELSE 0 END) as out_of_stock
+      FROM products WHERE active=1
+    `).get() as any
+
+    const slowMovers = db.prepare(`
+      SELECT p.id, p.name, p.code, p.stock, p.price,
+             COALESCE(SUM(si.quantity),0) as sold_30d
+      FROM products p
+      LEFT JOIN sale_items si ON si.product_id=p.id
+        AND si.sale_id IN (SELECT id FROM sales WHERE DATE(timestamp)>=DATE('now','-30 days'))
+      WHERE p.active=1 AND p.stock > 0
+      GROUP BY p.id HAVING sold_30d=0
+      ORDER BY p.stock DESC LIMIT 10
+    `).all()
+
+    return { today, yesterday, thisMonth, lastMonth, trend, topToday, recentSales, lowStock, byDayOfWeek: dowFull, inventoryValue, slowMovers }
+  })
+
+  ipcMain.handle('reports:get', (_, filters: any) => {
+    const { from, to } = filters
+
+    const kpis = db.prepare(`
+      SELECT
+        COUNT(*) as transactions,
+        COALESCE(SUM(total),0) as total_sales,
+        COALESCE(SUM(total - cost_total),0) as total_profit,
+        COALESCE(AVG(total),0) as avg_ticket,
+        COALESCE(AVG(CASE WHEN total > 0 THEN (total - cost_total)/total * 100 ELSE 0 END),0) as avg_margin
+      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+    `).get(from, to) as any
+
+    const byDay = db.prepare(`
+      SELECT DATE(timestamp) as date, SUM(total) as total, SUM(total - cost_total) as profit
+      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+      GROUP BY DATE(timestamp) ORDER BY date
+    `).all(from, to)
+
+    const byPayment = db.prepare(`
+      SELECT payment_type, SUM(total) as total, COUNT(*) as count
+      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+      GROUP BY payment_type
+    `).all(from, to)
+
+    const byCategory = db.prepare(`
+      SELECT c.name as category,
+             SUM(si.quantity * si.unit_price) as total,
+             SUM(si.quantity * si.unit_price - si.quantity * si.unit_cost) as profit,
+             SUM(si.quantity) as qty
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      JOIN products p ON si.product_id = p.id
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE DATE(s.timestamp) BETWEEN ? AND ? AND (s.cancelled IS NULL OR s.cancelled = 0)
+      GROUP BY c.name ORDER BY total DESC
+    `).all(from, to)
+
+    const topProducts = db.prepare(`
+      SELECT p.code, p.name, c.name as category,
+             SUM(si.quantity) as total_qty,
+             SUM(si.quantity * si.unit_price) as total_revenue,
+             SUM(si.quantity * (si.unit_price - si.unit_cost)) as total_profit
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      JOIN products p ON si.product_id = p.id
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE DATE(s.timestamp) BETWEEN ? AND ?
+      GROUP BY p.id ORDER BY total_revenue DESC LIMIT 10
+    `).all(from, to)
+
+    const topProfit = db.prepare(`
+      SELECT p.code, p.name, c.name as category,
+             SUM(si.quantity) as total_qty,
+             SUM(si.quantity * si.unit_price) as total_revenue,
+             SUM(si.quantity * (si.unit_price - si.unit_cost)) as total_profit,
+             AVG(CASE WHEN si.unit_price > 0 THEN (si.unit_price - si.unit_cost)/si.unit_price * 100 ELSE 0 END) as margin
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      JOIN products p ON si.product_id = p.id
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE DATE(s.timestamp) BETWEEN ? AND ?
+      GROUP BY p.id ORDER BY total_profit DESC LIMIT 10
+    `).all(from, to)
+
+    const byHour = db.prepare(`
+      SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour, SUM(total) as total, COUNT(*) as count
+      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+      GROUP BY hour ORDER BY hour
+    `).all(from, to)
+
+    return { kpis, byDay, byPayment, byCategory, topProducts, topProfit, byHour }
+  })
+
+  ipcMain.handle('reports:salesByPeriod', (_, filters: any) => {
+    let query = `
+      SELECT s.folio, s.timestamp, s.payment_type, s.total, s.cost_total,
+             u.name as cashier_name,
+             p.code as product_code, p.name as product_name, c.name as category_name,
+             si.quantity, si.unit_price, si.discount
+      FROM sales s
+      JOIN sale_items si ON si.sale_id = s.id
+      JOIN products p ON si.product_id = p.id
+      LEFT JOIN categories c ON p.category_id = c.id
+      LEFT JOIN users u ON s.cashier_id = u.id
+      WHERE 1=1
+    `
+    const params: any[] = []
+    if (filters?.from) { query += ' AND DATE(s.timestamp) >= ?'; params.push(filters.from) }
+    if (filters?.to) { query += ' AND DATE(s.timestamp) <= ?'; params.push(filters.to) }
+    query += ' ORDER BY s.timestamp DESC'
+    return db.prepare(query).all(...params)
+  })
+
+  // ─── INVOICES ───────────────────────────────────────────────────────────────
+  ipcMain.handle('invoices:getAll', () => {
+    return db.prepare(`
+      SELECT i.*, s.folio as sale_folio FROM invoices i
+      LEFT JOIN sales s ON i.sale_id = s.id
+      ORDER BY i.timestamp DESC
+    `).all()
+  })
+
+  ipcMain.handle('invoices:create', (_, data: any) => {
+    const folio_fiscal = generateFolioFiscal()
+    const xml = generateCFDIXml({ ...data, folio_fiscal })
+    const res = db.prepare(`
+      INSERT INTO invoices (sale_id, folio_fiscal, rfc_receptor, razon_social, cfdi_use, total, status, xml_content)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).run(data.sale_id || null, folio_fiscal, data.rfc_receptor, data.razon_social, data.cfdi_use, data.total, 'draft', xml)
+    return { success: true, id: res.lastInsertRowid, folio_fiscal, xml }
+  })
+
+  ipcMain.handle('invoices:update', (_, data: any) => {
+    db.prepare('UPDATE invoices SET status=? WHERE id=?').run(data.status, data.id)
+    return { success: true }
+  })
+
+  // ─── SETTINGS ───────────────────────────────────────────────────────────────
+  ipcMain.handle('settings:get', () => {
+    const rows = db.prepare('SELECT key, value FROM settings').all() as any[]
+    return Object.fromEntries(rows.map(r => [r.key, r.value]))
+  })
+
+  ipcMain.handle('settings:save', (_, data: any) => {
+    const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+    for (const [key, value] of Object.entries(data)) {
+      stmt.run(key, value as string)
+    }
+    return { success: true }
+  })
+
+  // ─── PRINTER ────────────────────────────────────────────────────────────────
+  ipcMain.handle('printer:getPorts', async () => {
+    try {
+      const { SerialPort } = await import('serialport')
+      const ports = await SerialPort.list()
+      return ports.map(p => p.path)
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('printer:getSystemPrinters', async () => {
+    try {
+      const win = BrowserWindow.getAllWindows()[0]
+      if (!win) return []
+      const printers = await win.webContents.getPrintersAsync()
+      return printers.map((p: any) => ({ name: p.name, isDefault: p.isDefault ?? false }))
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('printer:printZPL', async (_, { zpl, printerName }: { zpl: string; printerName: string }) => {
+    // CUPS uses underscores; normalize spaces → underscores so either format works
+    const cupsName = printerName.trim().replace(/ /g, '_')
+    const tmpFile = join(tmpdir(), `labels_${Date.now()}.zpl`)
+    try {
+      writeFileSync(tmpFile, zpl, 'utf8')
+      await new Promise<void>((resolve, reject) => {
+        exec(`lp -d "${cupsName}" -o raw "${tmpFile}"`, (err, _stdout, stderr) => {
+          try { unlinkSync(tmpFile) } catch {}
+          if (err) reject(new Error(stderr || err.message))
+          else resolve()
+        })
+      })
+      return { success: true }
+    } catch (err: any) {
+      try { unlinkSync(tmpFile) } catch {}
+      return { success: false, message: err.message }
+    }
+  })
+
+  ipcMain.handle('printer:printReceipt', async (_, data: any) => {
+    return new Promise<{ success: boolean; message?: string }>((resolve) => {
+      const win = new BrowserWindow({
+        width: 320,
+        height: 800,
+        show: false,
+        webPreferences: { nodeIntegration: false, contextIsolation: true },
+      })
+      const html = buildReceiptHTML(data)
+      win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      win.webContents.on('did-finish-load', () => {
+        win.webContents.print(
+          { silent: false, printBackground: true, margins: { marginType: 'none' } },
+          (success, reason) => {
+            win.destroy()
+            resolve(success ? { success: true } : { success: false, message: reason })
+          }
+        )
+      })
+      win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
+    })
+  })
+
+  ipcMain.handle('printer:printShift', async (_, data: any) => {
+    return new Promise<{ success: boolean; message?: string }>((resolve) => {
+      const win = new BrowserWindow({
+        width: 320, height: 900, show: false,
+        webPreferences: { nodeIntegration: false, contextIsolation: true },
+      })
+      const html = buildShiftHTML(data)
+      win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      win.webContents.on('did-finish-load', () => {
+        win.webContents.print(
+          { silent: false, printBackground: true, margins: { marginType: 'none' } },
+          (success, reason) => {
+            win.destroy()
+            resolve(success ? { success: true } : { success: false, message: reason })
+          }
+        )
+      })
+      win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
+    })
+  })
+
+  // ─── EXCEL ──────────────────────────────────────────────────────────────────
+  ipcMain.handle('excel:export', async (_, data: any) => {
+    try {
+      const { filePath } = await dialog.showSaveDialog({
+        title: 'Guardar Excel',
+        defaultPath: data.filename || 'export.xlsx',
+        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+      })
+      if (!filePath) return { success: false, message: 'Cancelado' }
+
+      const workbook = new ExcelJS.Workbook()
+      const sheet = workbook.addWorksheet(data.sheetName || 'Datos')
+
+      if (data.columns) sheet.columns = data.columns
+      if (data.rows) {
+        for (const row of data.rows) sheet.addRow(row)
+      }
+
+      // Style header
+      if (data.columns) {
+        const header = sheet.getRow(1)
+        header.font = { bold: true }
+        header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1e40af' } }
+        header.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+      }
+
+      await workbook.xlsx.writeFile(filePath)
+      return { success: true, filePath }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+
+  ipcMain.handle('excel:exportMulti', async (_, data: { filename: string; sheets: Array<{ name: string; columns: any[]; rows: any[] }> }) => {
+    try {
+      const { filePath } = await dialog.showSaveDialog({
+        title: 'Guardar Reporte Excel',
+        defaultPath: data.filename || 'reporte.xlsx',
+        filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+      })
+      if (!filePath) return { success: false, message: 'Cancelado' }
+
+      const workbook = new ExcelJS.Workbook()
+      for (const sheetDef of data.sheets) {
+        const ws = workbook.addWorksheet(sheetDef.name)
+        ws.columns = sheetDef.columns
+        for (const row of sheetDef.rows) ws.addRow(row)
+        const header = ws.getRow(1)
+        header.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+        header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF2D55' } }
+        ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: sheetDef.columns.length } }
+      }
+
+      await workbook.xlsx.writeFile(filePath)
+      return { success: true, filePath }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+
+  ipcMain.handle('dialog:showSave', async (_, opts: any) => {
+    return dialog.showSaveDialog(opts)
+  })
+
+  ipcMain.handle('dialog:showOpen', async (_, opts: any) => {
+    return dialog.showOpenDialog(opts)
+  })
+
+  ipcMain.handle('excel:readFile', async (_, filePath: string) => {
+    try {
+      const workbook = new ExcelJS.Workbook()
+      await workbook.xlsx.readFile(filePath)
+      const sheet = workbook.worksheets[0]
+      const rows: any[] = []
+      let headers: string[] = []
+
+      sheet.eachRow((row, idx) => {
+        const values = (row.values as any[]).slice(1)
+        if (idx === 1) {
+          headers = values.map(v => String(v || '').trim().toLowerCase())
+        } else {
+          const obj: any = {}
+          headers.forEach((h, i) => { obj[h] = values[i] })
+          rows.push(obj)
+        }
+      })
+
+      return { success: true, headers, rows }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+
+  // ─── BACKUP ─────────────────────────────────────────────────────────────────
+  ipcMain.handle('backup:create', () => {
+    try {
+      const userDataPath = app.getPath('userData')
+      const backupsDir = join(userDataPath, 'backups')
+      const { mkdirSync, copyFileSync, existsSync } = require('fs')
+      if (!existsSync(backupsDir)) mkdirSync(backupsDir, { recursive: true })
+      const srcPath = join(userDataPath, 'pos.db')
+      const now = new Date()
+      const name = `pos_backup_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}.db`
+      const destPath = join(backupsDir, name)
+      copyFileSync(srcPath, destPath)
+      return { success: true, filename: name }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+
+  ipcMain.handle('backup:list', () => {
+    try {
+      const userDataPath = app.getPath('userData')
+      const backupsDir = join(userDataPath, 'backups')
+      const { readdirSync, existsSync, statSync } = require('fs')
+      if (!existsSync(backupsDir)) return []
+      return readdirSync(backupsDir)
+        .filter((f: string) => f.endsWith('.db'))
+        .map((f: string) => ({ name: f, size: statSync(join(backupsDir, f)).size, path: join(backupsDir, f) }))
+        .reverse()
+    } catch {
+      return []
+    }
+  })
+
+  ipcMain.handle('backup:restore', async (_e, filename: string) => {
+    try {
+      const { copyFileSync, existsSync } = require('fs')
+      const userDataPath = app.getPath('userData')
+      const backupPath = join(userDataPath, 'backups', filename)
+      const dbPath = join(userDataPath, 'pos.db')
+      if (!existsSync(backupPath)) return { success: false, message: 'Archivo no encontrado' }
+      // Create safety backup before restoring
+      const now = new Date()
+      const safetyName = `pre_restore_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}.db`
+      copyFileSync(dbPath, join(userDataPath, 'backups', safetyName))
+      copyFileSync(backupPath, dbPath)
+      return { success: true }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+
+  ipcMain.handle('backup:export', async (_e, filename: string) => {
+    try {
+      const { dialog } = require('electron')
+      const { copyFileSync, existsSync } = require('fs')
+      const userDataPath = app.getPath('userData')
+      const backupPath = join(userDataPath, 'backups', filename)
+      if (!existsSync(backupPath)) return { success: false, message: 'Archivo no encontrado' }
+      const { filePath } = await dialog.showSaveDialog({
+        title: 'Exportar respaldo',
+        defaultPath: filename,
+        filters: [{ name: 'Base de datos', extensions: ['db'] }],
+      })
+      if (!filePath) return { success: false, message: 'Cancelado' }
+      copyFileSync(backupPath, filePath)
+      return { success: true, path: filePath }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+
+  ipcMain.handle('backup:import', async () => {
+    try {
+      const { dialog } = require('electron')
+      const { copyFileSync, mkdirSync, existsSync } = require('fs')
+      const { filePaths } = await dialog.showOpenDialog({
+        title: 'Importar respaldo',
+        filters: [{ name: 'Base de datos', extensions: ['db'] }],
+        properties: ['openFile'],
+      })
+      if (!filePaths?.length) return { success: false, message: 'Cancelado' }
+      const userDataPath = app.getPath('userData')
+      const backupsDir = join(userDataPath, 'backups')
+      if (!existsSync(backupsDir)) mkdirSync(backupsDir, { recursive: true })
+      const src = filePaths[0]
+      const name = `imported_${require('path').basename(src)}`
+      copyFileSync(src, join(backupsDir, name))
+      return { success: true, filename: name }
+    } catch (err: any) {
+      return { success: false, message: err.message }
+    }
+  })
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function generateFolioFiscal(): string {
+  const hex = () => Math.floor(Math.random() * 16).toString(16)
+  const seg = (n: number) => Array.from({ length: n }, hex).join('')
+  return `${seg(8)}-${seg(4)}-${seg(4)}-${seg(4)}-${seg(12)}`.toUpperCase()
+}
+
+function generateCFDIXml(data: any): string {
+  const now = new Date().toISOString()
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<cfdi:Comprobante xmlns:cfdi="http://www.sat.gob.mx/cfd/4"
+  Version="4.0" Serie="A" Folio="${data.folio_fiscal}"
+  Fecha="${now}" SubTotal="${data.total}" Total="${data.total}"
+  Moneda="MXN" TipoDeComprobante="I" MetodoPago="PUE" FormaPago="01"
+  LugarExpedicion="00000">
+  <cfdi:Receptor Rfc="${data.rfc_receptor}" Nombre="${data.razon_social}"
+    DomicilioFiscalReceptor="00000" RegimenFiscalReceptor="616"
+    UsoCFDI="${data.cfdi_use}"/>
+  <cfdi:Conceptos>
+    <cfdi:Concepto ClaveProdServ="01010101" Cantidad="1" ClaveUnidad="ACT"
+      Descripcion="${data.description || 'Compra'}" ValorUnitario="${data.total}"
+      Importe="${data.total}" ObjetoImp="01"/>
+  </cfdi:Conceptos>
+</cfdi:Comprobante>`
+}
+
+function buildReceiptHTML(data: any): string {
+  const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+
+  const itemRows = (data.items || []).map((item: any) => `
+    <tr>
+      <td style="padding:3px 0;font-size:48px">${item.name}</td>
+      <td style="text-align:right;white-space:nowrap;padding:3px 0 3px 16px;font-size:48px">${item.qty} x ${fmt(item.price)}</td>
+      <td style="text-align:right;white-space:nowrap;padding:3px 0 3px 16px;font-size:48px;font-weight:700">${fmt(item.qty * item.price)}</td>
+    </tr>
+    ${item.discount > 0 ? `<tr><td colspan="3" style="font-size:40px;color:#888;padding-bottom:3px">  Descuento: -${fmt(item.discount * item.qty)}</td></tr>` : ''}
+  `).join('')
+
+  let paymentRows = ''
+  if (data.isMixed && data.activePayments) {
+    for (const [method, amount] of Object.entries(data.activePayments as Record<string, number>)) {
+      const label = method.charAt(0).toUpperCase() + method.slice(1)
+      paymentRows += `<div style="display:flex;justify-content:space-between;font-size:48px"><span>${label}</span><span>${fmt(amount as number)}</span></div>`
+    }
+  } else {
+    const label = (data.paymentType || 'efectivo').charAt(0).toUpperCase() + (data.paymentType || 'efectivo').slice(1)
+    paymentRows = `<div style="display:flex;justify-content:space-between;font-size:48px"><span>${label}</span><span>${fmt(data.received || data.total)}</span></div>`
+  }
+
+  const changeRow = (data.change ?? 0) > 0
+    ? `<div style="display:flex;justify-content:space-between;font-size:52px;font-weight:900;color:#1a7a3a"><span>CAMBIO</span><span>${fmt(data.change)}</span></div>`
+    : ''
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 48px;
+    font-weight: 700;
+    color: #000;
+    background: #fff;
+    width: 76mm;
+    padding: 4mm;
+  }
+  h1 { font-size: 60px; text-align: center; font-weight: 900; margin-bottom: 2px; }
+  .sub { font-size: 40px; text-align: center; color: #444; font-weight: 700; }
+  .meta { font-size: 40px; margin: 1px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 6px 0; }
+  .divider { border-top: 2px solid #000; margin: 6px 0; }
+  .total-row { font-size: 60px; font-weight: 900; display: flex; justify-content: space-between; padding: 4px 0; }
+  @media print {
+    @page { margin: 0; size: 80mm auto; }
+    body { padding: 3mm; }
+  }
+</style>
+</head>
+<body>
+  <h1>${data.storeName || 'Mi Tienda'}</h1>
+  ${data.storeAddress ? `<div class="sub">${data.storeAddress}</div>` : ''}
+  ${data.storePhone ? `<div class="sub">Tel: ${data.storePhone}</div>` : ''}
+  <div class="divider"></div>
+  <div class="meta">Fecha: ${data.date}</div>
+  <div class="meta">Folio: <b>${data.folio}</b></div>
+  <div class="meta">Cajero: ${data.cashierName || ''}</div>
+  <div class="divider"></div>
+  <table>${itemRows}</table>
+  <div class="divider"></div>
+  <div class="total-row"><span>TOTAL</span><span>${fmt(data.total)}</span></div>
+  <div class="divider"></div>
+  ${paymentRows}
+  ${changeRow}
+  <div class="divider"></div>
+  <div style="text-align:center;font-size:40px;margin-top:4px">${data.footer || '¡Gracias por su compra!'}</div>
+</body>
+</html>`
+}
+
+function buildReceiptPrintData(data: any): any[] {
+  const fmt = (n: number) => `$${n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  const lines: any[] = [
+    { type: 'text', value: data.storeName || 'Mi Tienda', style: { textAlign: 'center', fontWeight: '700', fontSize: '16px' } },
+    { type: 'text', value: data.storeAddress || '', style: { textAlign: 'center', fontSize: '11px' } },
+    { type: 'text', value: data.storePhone || '', style: { textAlign: 'center', fontSize: '11px' } },
+    { type: 'text', value: '--------------------------------', style: { textAlign: 'center' } },
+    { type: 'text', value: `Fecha: ${data.date}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Folio: ${data.folio}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Cajero: ${data.cashierName}`, style: { fontSize: '11px' } },
+    { type: 'text', value: '--------------------------------', style: { textAlign: 'center' } },
+  ]
+
+  for (const item of data.items || []) {
+    lines.push({ type: 'text', value: item.name, style: { fontSize: '11px', fontWeight: '700' } })
+    lines.push({
+      type: 'text',
+      value: `  ${item.qty} x ${fmt(item.price)}  ${fmt(item.qty * item.price)}`,
+      style: { fontSize: '11px' },
+    })
+  }
+
+  lines.push({ type: 'text', value: '--------------------------------', style: { textAlign: 'center' } })
+  lines.push({ type: 'text', value: `TOTAL: ${fmt(data.total)}`, style: { fontWeight: '700', fontSize: '14px' } })
+  if (data.isMixed && data.activePayments) {
+    for (const [method, amount] of Object.entries(data.activePayments as Record<string, number>)) {
+      const label = method.charAt(0).toUpperCase() + method.slice(1)
+      lines.push({ type: 'text', value: `  ${label}: ${fmt(amount)}`, style: { fontSize: '11px' } })
+    }
+  } else {
+    const method = data.paymentType || 'Efectivo'
+    const label = method.charAt(0).toUpperCase() + method.slice(1)
+    lines.push({ type: 'text', value: `Pago (${label}): ${fmt(data.received || data.total)}`, style: { fontSize: '11px' } })
+  }
+  if ((data.change ?? 0) > 0) {
+    lines.push({ type: 'text', value: `Cambio: ${fmt(data.change)}`, style: { fontSize: '11px', fontWeight: '700' } })
+  }
+  lines.push({ type: 'text', value: '--------------------------------', style: { textAlign: 'center' } })
+  lines.push({ type: 'text', value: data.footer || 'Gracias por su compra', style: { textAlign: 'center', fontSize: '11px' } })
+  lines.push({ type: 'text', value: ' ', style: {} })
+
+  return lines
+}
+
+function buildShiftHTML(data: any): string {
+  const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+
+  const section = (title: string) =>
+    `<div class="section">== ${title} ==</div>`
+
+  const row = (label: string, value: string, bold = false) =>
+    `<div class="row ${bold ? 'bold' : ''}"><span>${label}</span><span>${value}</span></div>`
+
+  const sep = `<div class="sep">--------------------------------</div>`
+
+  // Categories
+  const catRows = (data.salesByCategory || []).map((c: any) =>
+    row(c.category || 'Sin categoría', fmt(c.total))
+  ).join('')
+
+  // Cash movements
+  const entradas = (data.movementDetails || []).filter((m: any) => m.type === 'entrada')
+  const salidas  = (data.movementDetails || []).filter((m: any) => m.type === 'salida')
+
+  const entradaRows = entradas.length
+    ? entradas.map((m: any) => row(m.concept || 'Entrada', fmt(m.amount))).join('')
+    : `<div class="note">- Sin entradas -</div>`
+
+  const salidaRows = salidas.length
+    ? salidas.map((m: any) => row(m.concept || 'Retiro', fmt(m.amount))).join('')
+    : `<div class="note">- Sin salidas -</div>`
+
+  const mixedRows = (data.sales?.mixedPayments || []).map((m: any) =>
+    row(m.method, fmt(m.amount))
+  ).join('')
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 44px;
+    font-weight: 700;
+    color: #000;
+    background: #fff;
+    width: 76mm;
+    padding: 4mm;
+  }
+  .center  { text-align: center; }
+  .store   { font-size: 56px; font-weight: 900; text-align: center; margin-bottom: 2px; }
+  .sub     { font-size: 38px; font-weight: 700; text-align: center; color: #333; }
+  .divider { border-top: 2px solid #000; margin: 5px 0; }
+  .title   { font-size: 52px; font-weight: 900; text-align: center; margin: 4px 0; letter-spacing: 0.05em; }
+  .section { font-size: 44px; font-weight: 900; text-align: center; margin: 6px 0 2px; letter-spacing: 0.04em; text-decoration: underline; }
+  .row     { display: flex; justify-content: space-between; font-size: 44px; font-weight: 700; padding: 2px 0; }
+  .row.bold{ font-weight: 900; font-size: 46px; }
+  .note    { font-size: 38px; font-weight: 700; text-align: center; color: #555; padding: 2px 0; }
+  .total   { display: flex; justify-content: space-between; font-size: 48px; font-weight: 900; padding: 4px 0; border-top: 2px solid #000; margin-top: 3px; }
+  @media print {
+    @page { margin: 0; size: 80mm auto; }
+    body  { padding: 3mm; }
+  }
+</style>
+</head>
+<body>
+  <div class="store">${data.storeName || 'Mi Tienda'}</div>
+  ${data.storeAddress ? `<div class="sub">${data.storeAddress}</div>` : ''}
+  ${data.storePhone   ? `<div class="sub">${data.storePhone}</div>` : ''}
+  ${data.storeSocial  ? `<div class="sub">${data.storeSocial}</div>` : ''}
+  <div class="divider"></div>
+  <div class="title">CORTE DEL DIA</div>
+  <div class="divider"></div>
+  <div class="row"><span>Realizado:</span><span>${data.endedAt || data.startedAt}</span></div>
+  <div class="row"><span>Cajero:</span><span>${data.cashierName || ''}</span></div>
+  <div class="row"><span>Turno #${data.shiftId || ''}:</span><span>${data.startedAt}</span></div>
+  <div class="row"><span>Ventas totales:</span><span>${fmt(data.sales?.total)}</span></div>
+  <div class="row"><span>N° ventas:</span><span>${data.sales?.count || 0}</span></div>
+
+  ${section('VENTAS')}
+  ${row('Efectivo:', fmt(data.sales?.efectivo))}
+  ${row('Tarjeta:', fmt(data.sales?.tarjeta))}
+  ${row('Transferencia:', fmt(data.sales?.transferencia))}
+  ${row('Mixto:', fmt(data.sales?.mixto || 0))}
+  <div class="total"><span>TOTAL VENTAS</span><span>${fmt(data.sales?.total)}</span></div>
+
+  ${section('POR DEPTO')}
+  ${catRows || `<div class="note">Sin datos</div>`}
+
+  ${section('GANANCIAS')}
+  ${row('Ventas:', fmt(data.sales?.total))}
+  ${row('Costo:', fmt(data.sales?.cost_total || 0))}
+  <div class="total"><span>UTILIDAD</span><span>${fmt(data.utility || 0)}</span></div>
+
+  ${section('ENTRADAS EFECTIVO')}
+  ${entradaRows}
+  <div class="total"><span>TOTAL ENTRADAS</span><span>${fmt(data.entradas || 0)}</span></div>
+
+  ${section('SALIDAS EFECTIVO')}
+  ${salidaRows}
+  <div class="total"><span>TOTAL SALIDAS</span><span>${fmt(data.salidas || 0)}</span></div>
+
+  ${section('RESUMEN CAJA')}
+  ${row('Inicial:', fmt(data.openingCash || 0))}
+  ${row('Ventas efectivo:', fmt(data.sales?.efectivo))}
+  ${row('+ Entradas:', fmt(data.entradas || 0))}
+  ${row('- Salidas:', fmt(data.salidas || 0))}
+  <div class="total"><span>ESPERADO EN CAJA</span><span>${fmt(data.expectedCash || 0)}</span></div>
+  ${data.countedCash !== undefined ? `
+  ${row('Contado:', fmt(data.countedCash))}
+  ${row('Diferencia:', fmt((data.countedCash || 0) - (data.expectedCash || 0)))}
+  ` : ''}
+  <div class="divider"></div>
+  <div class="note">${data.endedAt || new Date().toLocaleString('es-MX')}</div>
+</body>
+</html>`
+}
+
+function buildShiftPrintData(data: any): any[] {
+  const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  return [
+    { type: 'text', value: data.storeName || 'Mi Tienda', style: { textAlign: 'center', fontWeight: '700', fontSize: '16px' } },
+    { type: 'text', value: 'CORTE DE CAJA', style: { textAlign: 'center', fontWeight: '700' } },
+    { type: 'text', value: '--------------------------------', style: { textAlign: 'center' } },
+    { type: 'text', value: `Cajero: ${data.cashierName}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Apertura: ${data.startedAt}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Cierre: ${data.endedAt}`, style: { fontSize: '11px' } },
+    { type: 'text', value: '--------------------------------', style: { textAlign: 'center' } },
+    { type: 'text', value: `Ventas Efectivo: ${fmt(data.efectivo)}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Ventas Tarjeta: ${fmt(data.tarjeta)}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Ventas Transferencia: ${fmt(data.transferencia)}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `TOTAL VENTAS: ${fmt(data.total)}`, style: { fontWeight: '700' } },
+    { type: 'text', value: '--------------------------------', style: { textAlign: 'center' } },
+    { type: 'text', value: `Efectivo Inicial: ${fmt(data.openingCash)}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Entradas: ${fmt(data.entradas)}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Retiros: ${fmt(data.salidas)}`, style: { fontSize: '11px' } },
+    { type: 'text', value: `Efectivo Esperado: ${fmt(data.expectedCash)}`, style: { fontWeight: '700' } },
+    { type: 'text', value: `Efectivo Contado: ${fmt(data.countedCash)}`, style: { fontWeight: '700' } },
+    { type: 'text', value: `Diferencia: ${fmt(data.countedCash - data.expectedCash)}`, style: { fontWeight: '700' } },
+    { type: 'text', value: ' ', style: {} },
+  ]
+}

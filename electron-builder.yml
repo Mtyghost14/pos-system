@@ -1,0 +1,52 @@
+appId: com.tuempresa.pos-system
+productName: Sistema POS
+copyright: Copyright © 2025
+
+directories:
+  output: release
+
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+
+# macOS
+mac:
+  category: public.app-category.business
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  icon: public/icon.icns
+
+dmg:
+  title: Sistema POS
+  background: null
+  window:
+    width: 540
+    height: 380
+
+# Windows
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: public/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Sistema POS
+  # IMPORTANT: never delete userData on uninstall
+  deleteAppDataOnUninstall: false
+
+# Prevents userData from being wiped on update
+asar: true
+
+# Native modules (better-sqlite3, serialport)
+npmRebuild: false  # Handled by electron-rebuild in CI
+
+publish:
+  provider: github
+  releaseType: release
