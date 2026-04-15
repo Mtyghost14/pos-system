@@ -976,16 +976,30 @@ export function registerIpcHandlers() {
     // CUPS uses underscores; normalize spaces → underscores so either format works
     const cupsName = printerName.trim().replace(/ /g, '_')
     const tmpFile = join(tmpdir(), `labels_${Date.now()}.zpl`)
+    const tryCmd = (cmd: string) => new Promise<void>((resolve, reject) => {
+      exec(cmd, (err, _stdout, stderr) => {
+        if (err) reject(new Error(stderr || err.message))
+        else resolve()
+      })
+    })
     try {
       writeFileSync(tmpFile, zpl, 'utf8')
-      await new Promise<void>((resolve, reject) => {
-        exec(`lp -d "${cupsName}" -o raw "${tmpFile}"`, (err, _stdout, stderr) => {
+      let lastErr = ''
+      // Try lp with raw mode first, then lpr with literal (-l) mode as fallback
+      for (const cmd of [
+        `lp -d "${cupsName}" -o raw "${tmpFile}"`,
+        `lpr -P "${cupsName}" -l "${tmpFile}"`,
+      ]) {
+        try {
+          await tryCmd(cmd)
           try { unlinkSync(tmpFile) } catch {}
-          if (err) reject(new Error(stderr || err.message))
-          else resolve()
-        })
-      })
-      return { success: true }
+          return { success: true }
+        } catch (e: any) {
+          lastErr = e.message
+        }
+      }
+      try { unlinkSync(tmpFile) } catch {}
+      return { success: false, message: lastErr }
     } catch (err: any) {
       try { unlinkSync(tmpFile) } catch {}
       return { success: false, message: err.message }
@@ -1410,13 +1424,16 @@ function buildShiftHTML(data: any): string {
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 
   const sizeKey = data.receipt_font_size || 'medium'
-  const fontBase = sizeKey === 'small' ? 20 : sizeKey === 'large' ? 26 : 23
+  const fontBase = sizeKey === 'small' ? 23 : sizeKey === 'large' ? 29 : 26
 
   const section = (title: string) =>
     `<div class="section">${title}</div>`
 
   const row = (label: string, value: string, bold = false) =>
-    `<div class="row ${bold ? 'bold' : ''}"><span>${label}</span><span>${value}</span></div>`
+    `<div class="row ${bold ? 'bold' : ''}">${label} ${value}</div>`
+
+  const total = (label: string, value: string) =>
+    `<div class="total">${label}: ${value}</div>`
 
   // Categories — ventas + ganancia
   const catVentasRows = (data.salesByCategory || []).map((c: any) =>
@@ -1450,23 +1467,26 @@ function buildShiftHTML(data: any): string {
     font-family: 'Courier New', Courier, monospace;
     font-size: ${fontBase}px;
     font-weight: 400;
+    line-height: 1.5;
+    text-align: center;
     color: #000;
     background: #fff;
     width: 76mm;
-    padding: 3mm;
+    margin: 0 auto;
+    padding: 4mm;
   }
-  .store   { font-size: ${fontBase + 5}px; font-weight: 700; text-align: center; margin-bottom: 1px; }
-  .sub     { font-size: ${fontBase - 3}px; font-weight: 400; text-align: center; color: #333; }
-  .divider { border-top: 1px solid #000; margin: 4px 0; }
-  .title   { font-size: ${fontBase + 3}px; font-weight: 700; text-align: center; margin: 3px 0; }
-  .section { font-size: ${fontBase - 1}px; font-weight: 700; text-align: center; margin: 5px 0 2px; text-decoration: underline; }
-  .row     { display: flex; justify-content: space-between; font-size: ${fontBase - 1}px; font-weight: 400; padding: 1px 0; }
-  .row.bold{ font-weight: 700; font-size: ${fontBase}px; }
-  .note    { font-size: ${fontBase - 3}px; font-weight: 400; text-align: center; color: #555; padding: 1px 0; }
-  .total   { display: flex; justify-content: space-between; font-size: ${fontBase + 1}px; font-weight: 700; padding: 3px 0; border-top: 1px solid #000; margin-top: 2px; }
+  .store   { font-size: ${fontBase + 6}px; font-weight: 700; margin-bottom: 3px; }
+  .sub     { font-size: ${fontBase - 2}px; font-weight: 600; color: #333; }
+  .divider { border-top: 1px solid #000; margin: 6px 0; }
+  .title   { font-size: ${fontBase + 4}px; font-weight: 700; margin: 5px 0; }
+  .section { font-size: ${fontBase}px; font-weight: 700; margin: 8px 0 3px; text-decoration: underline; }
+  .row     { font-size: ${fontBase}px; font-weight: 500; padding: 2px 0; }
+  .row.bold{ font-weight: 700; font-size: ${fontBase + 1}px; }
+  .note    { font-size: ${fontBase - 2}px; font-weight: 500; color: #555; padding: 2px 0; }
+  .total   { font-size: ${fontBase + 2}px; font-weight: 700; padding: 4px 0; border-top: 1px solid #000; margin-top: 3px; }
   @media print {
     @page { margin: 0; size: 80mm auto; }
-    body  { padding: 2mm; }
+    body  { padding: 3mm; }
   }
 </style>
 </head>
@@ -1489,29 +1509,29 @@ function buildShiftHTML(data: any): string {
   ${row('Tarjeta:', fmt(data.sales?.tarjeta))}
   ${row('Transferencia:', fmt(data.sales?.transferencia))}
   ${(data.sales?.mixto || 0) > 0 ? row('Mixto:', fmt(data.sales?.mixto)) : ''}
-  <div class="total"><span>TOTAL VENTAS</span><span>${fmt(data.sales?.total)}</span></div>
+  ${total('TOTAL VENTAS', fmt(data.sales?.total))}
 
   ${section('VENTAS POR DEPTO')}
   ${catVentasRows || `<div class="note">Sin datos</div>`}
 
   ${section('GANANCIA POR DEPTO')}
   ${catGananciaRows || `<div class="note">Sin datos</div>`}
-  <div class="total"><span>UTILIDAD TOTAL</span><span>${fmt(data.utility || 0)}</span></div>
+  ${total('UTILIDAD TOTAL', fmt(data.utility || 0))}
 
   ${section('ENTRADAS EFECTIVO')}
   ${entradaRows}
-  <div class="total"><span>TOTAL ENTRADAS</span><span>${fmt(data.entradas || 0)}</span></div>
+  ${total('TOTAL ENTRADAS', fmt(data.entradas || 0))}
 
   ${section('SALIDAS EFECTIVO')}
   ${salidaRows}
-  <div class="total"><span>TOTAL SALIDAS</span><span>${fmt(data.salidas || 0)}</span></div>
+  ${total('TOTAL SALIDAS', fmt(data.salidas || 0))}
 
   ${section('RESUMEN CAJA')}
   ${row('Inicial:', fmt(data.openingCash || 0))}
   ${row('Ventas efectivo:', fmt(data.sales?.efectivo))}
   ${row('+ Entradas:', fmt(data.entradas || 0))}
   ${row('- Salidas:', fmt(data.salidas || 0))}
-  <div class="total"><span>ESPERADO EN CAJA</span><span>${fmt(data.expectedCash || 0)}</span></div>
+  ${total('ESPERADO EN CAJA', fmt(data.expectedCash || 0))}
   ${data.countedCash !== undefined ? `
   ${row('Contado:', fmt(data.countedCash))}
   ${row('Diferencia:', fmt((data.countedCash || 0) - (data.expectedCash || 0)))}
@@ -1550,11 +1570,13 @@ function buildShiftPrintData(data: any): any[] {
 function buildDailyCorteHTML(data: any, stored: any): string {
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
   const sizeKey = stored.receipt_font_size || 'medium'
-  const fontBase = sizeKey === 'small' ? 20 : sizeKey === 'large' ? 26 : 23
+  const fontBase = sizeKey === 'small' ? 23 : sizeKey === 'large' ? 29 : 26
 
   const section = (t: string) => `<div class="section">${t}</div>`
   const row = (l: string, v: string, bold = false) =>
-    `<div class="row ${bold ? 'bold' : ''}"><span>${l}</span><span>${v}</span></div>`
+    `<div class="row ${bold ? 'bold' : ''}">${l} ${v}</div>`
+  const total = (l: string, v: string) =>
+    `<div class="total">${l}: ${v}</div>`
 
   const cashierRows = (data.byCashier || []).map((c: any) =>
     row(c.cashier, `${c.count} vtas · ${fmt(c.total)}`)
@@ -1583,17 +1605,17 @@ function buildDailyCorteHTML(data: any, stored: any): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
-  body { font-family:'Courier New',Courier,monospace; font-size:${fontBase}px; font-weight:550; color:#000; background:#fff; width:76mm; padding:3mm; }
-  .store   { font-size:${fontBase+5}px; font-weight:800; text-align:center; margin-bottom:1px; }
-  .sub     { font-size:${fontBase-3}px; font-weight:500; text-align:center; color:#333; }
-  .divider { border-top:1px solid #000; margin:4px 0; }
-  .title   { font-size:${fontBase+3}px; font-weight:750; text-align:center; margin:3px 0; }
-  .section { font-size:${fontBase-1}px; font-weight:750; text-align:center; margin:5px 0 2px; text-decoration:underline; }
-  .row     { display:flex; justify-content:space-between; font-size:${fontBase-1}px; font-weight:400; padding:1px 0; }
-  .row.bold{ font-weight:800; font-size:${fontBase}px; }
-  .note    { font-size:${fontBase-3}px; font-weight:600; text-align:center; color:#555; padding:1px 0; }
-  .total   { display:flex; justify-content:space-between; font-size:${fontBase+1}px; font-weight:700; padding:3px 0; border-top:1px solid #000; margin-top:2px; }
-  @media print { @page { margin:0; size:80mm auto; } body { padding:2mm; } }
+  body { font-family:'Courier New',Courier,monospace; font-size:${fontBase}px; font-weight:500; line-height:1.5; text-align:center; color:#000; background:#fff; width:76mm; margin:0 auto; padding:4mm; }
+  .store   { font-size:${fontBase+6}px; font-weight:700; margin-bottom:3px; }
+  .sub     { font-size:${fontBase-2}px; font-weight:600; color:#333; }
+  .divider { border-top:1px solid #000; margin:6px 0; }
+  .title   { font-size:${fontBase+4}px; font-weight:700; margin:5px 0; }
+  .section { font-size:${fontBase}px; font-weight:700; margin:8px 0 3px; text-decoration:underline; }
+  .row     { font-size:${fontBase}px; font-weight:500; padding:2px 0; }
+  .row.bold{ font-weight:700; font-size:${fontBase+1}px; }
+  .note    { font-size:${fontBase-2}px; font-weight:500; color:#555; padding:2px 0; }
+  .total   { font-size:${fontBase+2}px; font-weight:700; padding:4px 0; border-top:1px solid #000; margin-top:3px; }
+  @media print { @page { margin:0; size:80mm auto; } body { padding:3mm; } }
 </style></head><body>
   <div class="store">${stored.store_name || 'Mi Tienda'}</div>
   ${stored.store_address ? `<div class="sub">${stored.store_address}</div>` : ''}
@@ -1610,7 +1632,7 @@ function buildDailyCorteHTML(data: any, stored: any): string {
   ${row('Tarjeta:', fmt(data.sales?.tarjeta))}
   ${row('Transferencia:', fmt(data.sales?.transferencia))}
   ${(data.sales?.mixto || 0) > 0 ? row('Mixto:', fmt(data.sales?.mixto)) : ''}
-  <div class="total"><span>TOTAL VENTAS</span><span>${fmt(data.sales?.total)}</span></div>
+  ${total('TOTAL VENTAS', fmt(data.sales?.total))}
 
   ${section('POR CAJERO')}
   ${cashierRows || '<div class="note">Sin datos</div>'}
@@ -1620,22 +1642,22 @@ function buildDailyCorteHTML(data: any, stored: any): string {
 
   ${section('GANANCIA POR DEPTO')}
   ${catGananciaRows || '<div class="note">Sin datos</div>'}
-  <div class="total"><span>UTILIDAD TOTAL</span><span>${fmt(data.utility || 0)}</span></div>
+  ${total('UTILIDAD TOTAL', fmt(data.utility || 0))}
 
   ${section('ENTRADAS EFECTIVO')}
   ${entradaRows}
-  <div class="total"><span>TOTAL ENTRADAS</span><span>${fmt(data.entradas || 0)}</span></div>
+  ${total('TOTAL ENTRADAS', fmt(data.entradas || 0))}
 
   ${section('SALIDAS EFECTIVO')}
   ${salidaRows}
-  <div class="total"><span>TOTAL SALIDAS</span><span>${fmt(data.salidas || 0)}</span></div>
+  ${total('TOTAL SALIDAS', fmt(data.salidas || 0))}
 
   ${section('RESUMEN CAJA')}
   ${row('Ef. inicial (todos los turnos):', fmt(data.openingCash || 0))}
   ${row('Ventas efectivo:', fmt(data.sales?.efectivo))}
   ${row('+ Entradas:', fmt(data.entradas || 0))}
   ${row('- Salidas:', fmt(data.salidas || 0))}
-  <div class="total"><span>ESPERADO EN CAJA</span><span>${fmt(data.expectedCash || 0)}</span></div>
+  ${total('ESPERADO EN CAJA', fmt(data.expectedCash || 0))}
 
   <div class="divider"></div>
   <div class="note">${new Date().toLocaleString('es-MX')}</div>

@@ -1303,9 +1303,12 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
   const totalLabels = items.reduce((s, i) => s + i.qty, 0)
 
   const handlePrint = async () => {
-    const printerName = zebraPrinter.replace(/ /g, '_')
+    // Always fetch fresh settings so a newly saved printer is picked up without page reload
+    const freshSettings = await window.api.getSettings()
+    const freshPrinter = (freshSettings?.label_printer || zebraPrinter || '').trim()
+    const printerName = freshPrinter.replace(/ /g, '_')
     if (!printerName) {
-      setPrintMsg({ ok: false, text: 'Configura la impresora Zebra en Configuración → Impresora' })
+      setPrintMsg({ ok: false, text: 'Configura la impresora Zebra en Configuración → Tickets y Etiquetas' })
       return
     }
     setPrinting(true)
@@ -1314,7 +1317,7 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
     const res = await (window.api as any).printZPL({ zpl, printerName })
     setPrinting(false)
     if (res.success) {
-      setPrintMsg({ ok: true, text: `✓ ${totalLabels} etiqueta${totalLabels !== 1 ? 's' : ''} enviada${totalLabels !== 1 ? 's' : ''} a ${printerName}` })
+      setPrintMsg({ ok: true, text: `✓ ${totalLabels} etiqueta${totalLabels !== 1 ? 's' : ''} enviada${totalLabels !== 1 ? 's' : ''} a ${freshPrinter}` })
     } else {
       setPrintMsg({ ok: false, text: res.message || 'Error al imprimir' })
     }

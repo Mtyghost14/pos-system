@@ -262,17 +262,52 @@ function PrinterSettings({ showMsg }: any) {
 
 function ZebraSettings({ showMsg }: any) {
   const { settings, loadSettings } = useSettingsStore()
-  const [cupsName, setCupsName] = useState('')
+  const [selected, setSelected] = useState('')
+  const [printers, setPrinters] = useState<{ name: string; isDefault: boolean }[]>([])
+  const [loadingPrinters, setLoadingPrinters] = useState(false)
+  const [testing, setTesting] = useState(false)
 
   useEffect(() => {
-    if (settings) setCupsName(settings.label_printer || '')
+    if (settings) setSelected(settings.label_printer || '')
   }, [settings])
 
+  const fetchPrinters = async () => {
+    setLoadingPrinters(true)
+    const list = await (window.api as any).getSystemPrinters()
+    setPrinters(list || [])
+    setLoadingPrinters(false)
+    // Auto-select zebra if nothing selected yet
+    if (!selected) {
+      const zebra = (list || []).find((p: any) => /zebra/i.test(p.name))
+      if (zebra) setSelected(zebra.name)
+    }
+  }
+
+  useEffect(() => { fetchPrinters() }, [])
+
   const handleSave = async () => {
-    await window.api.saveSettings({ label_printer: cupsName.trim() })
+    await window.api.saveSettings({ label_printer: selected.trim() })
     await loadSettings()
     showMsg('Impresora de etiquetas guardada')
   }
+
+  const handleTest = async () => {
+    if (!selected) return
+    setTesting(true)
+    const testZPL = [
+      '^XA',
+      '^FO30,30^A0N,40,40^FDPrueba de impresion^FS',
+      '^FO30,80^A0N,30,30^FDEtiquetadora OK^FS',
+      '^XZ',
+    ].join('\n')
+    const printerName = selected.replace(/ /g, '_')
+    const res = await (window.api as any).printZPL({ zpl: testZPL, printerName })
+    setTesting(false)
+    if (res?.success) showMsg('Prueba enviada a la impresora')
+    else showMsg('Error: ' + (res?.message || 'No se pudo imprimir'))
+  }
+
+  const zebraFound = printers.some(p => /zebra/i.test(p.name))
 
   return (
     <div style={{ background: 'var(--nm-surface)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -286,31 +321,81 @@ function ZebraSettings({ showMsg }: any) {
       </div>
 
       <div>
-        <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: 6 }}>
-          Nombre CUPS de la impresora Zebra
-        </label>
-        <input
-          value={cupsName}
-          onChange={e => setCupsName(e.target.value)}
-          className="nm-input"
-          style={{ width: '100%', padding: '10px 14px', fontSize: 13, fontFamily: 'monospace' }}
-          placeholder="Zebra_Technologies_ZTC_LP_2824_Plus"
-        />
-        <div style={{ fontSize: 11, color: 'var(--nm-text-muted)', marginTop: 5 }}>
-          Ejecuta <code style={{ background: 'var(--nm-bg)', padding: '1px 5px', borderRadius: 4, fontFamily: 'monospace' }}>lpstat -p</code> en Terminal para ver el nombre exacto
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Seleccionar impresora
+          </label>
+          <button onClick={fetchPrinters} className="nm-btn" style={{ padding: '4px 10px', fontSize: 11, color: 'var(--nm-accent)' }}>
+            {loadingPrinters ? 'Cargando...' : '↻ Actualizar'}
+          </button>
         </div>
+
+        {printers.length === 0 ? (
+          <div style={{ padding: '10px 14px', borderRadius: 10, background: 'var(--nm-bg)', boxShadow: 'var(--nm-inset)', fontSize: 12, color: 'var(--nm-text-muted)' }}>
+            {loadingPrinters ? 'Buscando impresoras...' : 'No se encontraron impresoras. Asegúrate de que estén instaladas en macOS.'}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {printers.map(p => {
+              const isZebra = /zebra/i.test(p.name)
+              const isSelected = selected === p.name
+              return (
+                <div
+                  key={p.name}
+                  onClick={() => setSelected(p.name)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '10px 14px', borderRadius: 12, cursor: 'pointer',
+                    background: isSelected ? 'var(--nm-bg)' : 'var(--nm-bg)',
+                    boxShadow: isSelected
+                      ? 'inset 2px 2px 6px rgba(91,141,238,0.2), inset -2px -2px 5px rgba(255,255,255,0.7), 0 0 0 2px var(--nm-accent)'
+                      : 'var(--nm-inset-sm)',
+                    transition: 'box-shadow 0.15s',
+                  }}
+                >
+                  <span style={{ fontSize: 16 }}>{isZebra ? '🦓' : '🖨️'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nm-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {p.name}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--nm-text-muted)', fontWeight: 500 }}>
+                      {isZebra ? 'Impresora de etiquetas ZPL' : 'Impresora de sistema'}{p.isDefault ? ' · Por defecto' : ''}
+                    </div>
+                  </div>
+                  {isSelected && (
+                    <span style={{ fontSize: 14, color: 'var(--nm-accent)', fontWeight: 900 }}>✓</span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {!zebraFound && printers.length > 0 && (
+          <div style={{ fontSize: 11, color: '#c98f00', marginTop: 8, fontWeight: 600 }}>
+            ⚠️ No se detectó una impresora Zebra. Instálala primero en Preferencias del Sistema → Impresoras.
+          </div>
+        )}
       </div>
 
-      {cupsName && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(52,199,89,0.08)', borderRadius: 10, padding: '9px 14px', border: '1px solid rgba(52,199,89,0.2)' }}>
-          <span style={{ fontSize: 14 }}>🦓</span>
-          <span style={{ fontSize: 12, fontWeight: 700, color: '#1A8F3A', fontFamily: 'monospace' }}>{cupsName}</span>
-        </div>
-      )}
-
-      <button onClick={handleSave} className="nm-btn-accent" style={{ padding: '12px', fontSize: 14 }}>
-        Guardar Impresora Zebra
-      </button>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <button
+          onClick={handleTest}
+          disabled={!selected || testing}
+          className="nm-btn"
+          style={{ flex: 1, padding: '12px', fontSize: 13, opacity: !selected ? 0.4 : 1 }}
+        >
+          {testing ? 'Enviando...' : '🧪 Prueba de impresión'}
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={!selected}
+          className="nm-btn-accent"
+          style={{ flex: 1, padding: '12px', fontSize: 13, opacity: !selected ? 0.4 : 1 }}
+        >
+          Guardar
+        </button>
+      </div>
     </div>
   )
 }
