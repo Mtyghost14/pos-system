@@ -14,67 +14,68 @@ const fmtDate = (s: string) => {
 
 const BILLS = [1000, 500, 200, 100, 50, 20]
 const COINS = [20, 10, 5, 2, 1, 0.5]
+const fmtD = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+
+function DenomRow({ keyId, value, label, isBill, qty, onSet }: {
+  keyId: string; value: number; label: string; isBill: boolean
+  qty: string; onSet: (k: string, v: string) => void
+}) {
+  const q = parseFloat(qty || '0') || 0
+  const subtotal = q * value
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '1fr 100px 90px',
+      alignItems: 'center', gap: 10,
+      padding: '6px 4px',
+      boxShadow: '0 1px 0 var(--nm-shadow-light), 0 2px 0 rgba(184,190,199,0.2)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{
+          minWidth: 64, padding: '4px 10px', borderRadius: 8,
+          background: isBill
+            ? 'linear-gradient(145deg, #6b9cf0, #4d7ee8)'
+            : 'linear-gradient(145deg, #c8cdd5, #adb4be)',
+          boxShadow: isBill
+            ? '2px 2px 6px rgba(77,126,232,0.35), -1px -1px 4px rgba(255,255,255,0.6)'
+            : '2px 2px 6px rgba(150,160,175,0.3), -1px -1px 4px rgba(255,255,255,0.6)',
+          color: 'white', fontWeight: 900, fontSize: 13, textAlign: 'center',
+        }}>
+          {label}
+        </div>
+        <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--nm-text-muted)' }}>
+          {isBill ? 'billete' : 'moneda'}
+        </span>
+      </div>
+      <input
+        type="number"
+        value={qty}
+        onChange={e => onSet(keyId, e.target.value)}
+        placeholder="0"
+        min="0"
+        className="nm-input"
+        style={{ padding: '6px 10px', fontSize: 15, fontWeight: 800, textAlign: 'center', width: '100%' }}
+        onFocus={e => e.target.select()}
+      />
+      <div style={{
+        textAlign: 'right', fontSize: 13, fontWeight: 800,
+        color: subtotal > 0 ? 'var(--nm-text)' : 'var(--nm-text-light)',
+      }}>
+        {subtotal > 0 ? fmtD(subtotal) : '—'}
+      </div>
+    </div>
+  )
+}
 
 function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) => void; onClose: () => void }) {
   const [qty, setQty] = useState<Record<string, string>>({})
 
-  const total = [...BILLS, ...COINS].reduce((sum, d) => {
-    return sum + (parseFloat(qty[String(d)] || '0') || 0) * d
-  }, 0)
+  // Use prefixed keys so b_20 (bill) and c_20 (coin) are separate
+  const total =
+    BILLS.reduce((sum, d) => sum + (parseFloat(qty[`b_${d}`] || '0') || 0) * d, 0) +
+    COINS.reduce((sum, d) => sum + (parseFloat(qty[`c_${d}`] || '0') || 0) * d, 0)
 
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
-  const set = (d: number, v: string) => setQty(p => ({ ...p, [String(d)]: v }))
-
-  const DenomRow = ({ value, label }: { value: number; label: string }) => {
-    const q = parseFloat(qty[String(value)] || '0') || 0
-    const subtotal = q * value
-    return (
-      <div style={{
-        display: 'grid', gridTemplateColumns: '1fr 100px 90px',
-        alignItems: 'center', gap: 10,
-        padding: '6px 4px',
-        boxShadow: '0 1px 0 var(--nm-shadow-light), 0 2px 0 rgba(184,190,199,0.2)',
-      }}>
-        {/* Denomination chip */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{
-            minWidth: 64, padding: '4px 10px', borderRadius: 8,
-            background: value >= 20 && BILLS.includes(value)
-              ? 'linear-gradient(145deg, #6b9cf0, #4d7ee8)'
-              : 'linear-gradient(145deg, #c8cdd5, #adb4be)',
-            boxShadow: value >= 20 && BILLS.includes(value)
-              ? '2px 2px 6px rgba(77,126,232,0.35), -1px -1px 4px rgba(255,255,255,0.6)'
-              : '2px 2px 6px rgba(150,160,175,0.3), -1px -1px 4px rgba(255,255,255,0.6)',
-            color: 'white', fontWeight: 900, fontSize: 13,
-            textAlign: 'center',
-          }}>
-            {label}
-          </div>
-          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--nm-text-muted)' }}>
-            {value >= 20 && BILLS.includes(value) ? 'billete' : 'moneda'}
-          </span>
-        </div>
-        {/* Quantity input */}
-        <input
-          type="number"
-          value={qty[String(value)] ?? ''}
-          onChange={e => set(value, e.target.value)}
-          placeholder="0"
-          min="0"
-          className="nm-input"
-          style={{ padding: '6px 10px', fontSize: 15, fontWeight: 800, textAlign: 'center', width: '100%' }}
-          onFocus={e => e.target.select()}
-        />
-        {/* Subtotal */}
-        <div style={{
-          textAlign: 'right', fontSize: 13, fontWeight: 800,
-          color: subtotal > 0 ? 'var(--nm-text)' : 'var(--nm-text-light)',
-        }}>
-          {subtotal > 0 ? fmt(subtotal) : '—'}
-        </div>
-      </div>
-    )
-  }
+  const set = (k: string, v: string) => setQty(p => ({ ...p, [k]: v }))
 
   return (
     <Modal title="🪙 Contador de Efectivo" onClose={onClose} size="md">
@@ -96,7 +97,7 @@ function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) =
           Billetes
         </div>
         {BILLS.map(d => (
-          <DenomRow key={d} value={d} label={`$${d}`} />
+          <DenomRow key={`b_${d}`} keyId={`b_${d}`} value={d} label={`$${d}`} isBill={true} qty={qty[`b_${d}`] ?? ''} onSet={set} />
         ))}
 
         {/* Coins section */}
@@ -104,7 +105,7 @@ function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) =
           Monedas
         </div>
         {COINS.map(d => (
-          <DenomRow key={d} value={d} label={d < 1 ? `${d * 100}¢` : `$${d}`} />
+          <DenomRow key={`c_${d}`} keyId={`c_${d}`} value={d} label={d < 1 ? `${d * 100}¢` : `$${d}`} isBill={false} qty={qty[`c_${d}`] ?? ''} onSet={set} />
         ))}
 
         {/* Total */}

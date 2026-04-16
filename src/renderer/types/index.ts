@@ -167,4 +167,5 @@ export interface CartItem {
   unit_cost: number
   discount: number
   promo_name?: string
+  stock?: number
 }

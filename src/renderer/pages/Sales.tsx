@@ -34,11 +34,35 @@ export default function Sales() {
   const [cancelTarget, setCancelTarget] = useState<any>(null)
   const [cancelReason, setCancelReason] = useState('')
   const [cancelLoading, setCancelLoading] = useState(false)
+  const [heldCarts, setHeldCarts] = useState<{ id: number; items: CartItem[]; label: string }[]>([])
+  const [showDailySales, setShowDailySales] = useState(false)
+  const [dailySales, setDailySales] = useState<any[]>([])
   const codeRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
-    if (shift) loadCashBalance()
-  }, [shift])
+    if (shift) {
+      loadCashBalance()
+      // Restore persisted cart
+      try {
+        const savedCart = localStorage.getItem(`cart_${shift.id}`)
+        if (savedCart) { const p = JSON.parse(savedCart); if (Array.isArray(p) && p.length) setCart(p) }
+        const savedHeld = localStorage.getItem(`held_${shift.id}`)
+        if (savedHeld) { const p = JSON.parse(savedHeld); if (Array.isArray(p)) setHeldCarts(p) }
+      } catch {}
+    }
+  }, [shift?.id])
+
+  // Persist cart to localStorage whenever it changes
+  useEffect(() => {
+    if (!shift) return
+    try { localStorage.setItem(`cart_${shift.id}`, JSON.stringify(cart)) } catch {}
+  }, [cart, shift?.id])
+
+  // Persist held carts to localStorage
+  useEffect(() => {
+    if (!shift) return
+    try { localStorage.setItem(`held_${shift.id}`, JSON.stringify(heldCarts)) } catch {}
+  }, [heldCarts, shift?.id])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -69,12 +93,19 @@ export default function Sales() {
   }
 
   const addToCart = (product: Product) => {
+    const idx = cart.findIndex(i => i.product_id === product.id)
+    const currentQty = idx >= 0 ? cart[idx].quantity : 0
+    if (product.stock !== undefined && product.stock !== null && currentQty + 1 > product.stock) {
+      setSaleStatus(`⚠ Stock insuficiente: ${product.name} (${product.stock} disponibles)`)
+      setTimeout(() => setSaleStatus(''), 3000)
+      return
+    }
     const price = product.promo_price ?? product.price
     setCart(prev => {
-      const idx = prev.findIndex(i => i.product_id === product.id)
-      if (idx >= 0) {
+      const i2 = prev.findIndex(i => i.product_id === product.id)
+      if (i2 >= 0) {
         const updated = [...prev]
-        updated[idx] = { ...updated[idx], quantity: updated[idx].quantity + 1 }
+        updated[i2] = { ...updated[i2], quantity: updated[i2].quantity + 1 }
         return updated
       }
       return [...prev, {
@@ -86,6 +117,7 @@ export default function Sales() {
         unit_cost: product.cost,
         discount: product.promo_price ? product.price - product.promo_price : 0,
         promo_name: product.promo_name,
+        stock: product.stock,
       }]
     })
     setSaleStatus(`✓ ${product.name} agregado`)
@@ -93,6 +125,10 @@ export default function Sales() {
   }
 
   const handleNewSale = () => {
+    if (cart.length > 0) {
+      const label = `Ticket ${heldCarts.length + 1} (${cart.length} art.)`
+      setHeldCarts(prev => [...prev, { id: Date.now(), items: cart, label }])
+    }
     setCart([])
     setCodeInput('')
     setMixedMode(false)
@@ -100,6 +136,38 @@ export default function Sales() {
     setPaymentEnabled({ efectivo: true, tarjeta: false, transferencia: false })
     setLastSale(null)
     codeRef.current?.focus()
+  }
+
+  const switchToHeldCart = (heldId: number) => {
+    const held = heldCarts.find(h => h.id === heldId)
+    if (!held) return
+    if (cart.length > 0) {
+      const label = `Ticket ${heldCarts.filter(h => h.id !== heldId).length + 1} (${cart.length} art.)`
+      setHeldCarts(prev => [...prev.filter(h => h.id !== heldId), { id: Date.now(), items: cart, label }])
+    } else {
+      setHeldCarts(prev => prev.filter(h => h.id !== heldId))
+    }
+    setCart(held.items)
+    setCodeInput('')
+    setMixedMode(false)
+    setPayments({ efectivo: '', tarjeta: '', transferencia: '' })
+    setPaymentEnabled({ efectivo: true, tarjeta: false, transferencia: false })
+    codeRef.current?.focus()
+  }
+
+  const discardHeldCart = (heldId: number) => {
+    setHeldCarts(prev => prev.filter(h => h.id !== heldId))
+  }
+
+  const loadDailySales = async () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const res = await window.api.getSales({ from: today, to: today, includeItems: true })
+    setDailySales(res)
+  }
+
+  const openDailySales = async () => {
+    await loadDailySales()
+    setShowDailySales(true)
   }
 
   const removeFromCart = (idx: number) => {
@@ -121,15 +189,19 @@ export default function Sales() {
   const totalDiscount = cart.reduce((s, i) => s + i.discount * i.quantity, 0)
   const total = subtotal
 
-  const assigned = Object.entries(payments)
-    .filter(([k]) => paymentEnabled[k as keyof typeof paymentEnabled])
-    .reduce((s, [, v]) => s + (parseFloat(v) || 0), 0)
   const cashAmt = parseFloat(payments.efectivo) || 0
-  const pending = total - assigned
-  const change = paymentEnabled.efectivo && cashAmt > 0
-    ? Math.max(0, cashAmt - Math.max(0, total - (assigned - cashAmt)))
+  // Non-cash is capped at the sale total — card/transfer never give change
+  const nonCashRaw = (['tarjeta', 'transferencia'] as const)
+    .filter(k => paymentEnabled[k])
+    .reduce((s, k) => s + (parseFloat(payments[k]) || 0), 0)
+  const nonCashEffective = Math.min(nonCashRaw, total)
+  const cashNeeded = Math.max(0, total - nonCashEffective)
+  const change = paymentEnabled.efectivo && cashAmt > cashNeeded
+    ? cashAmt - cashNeeded
     : 0
-  const canCharge = cart.length > 0 && assigned >= total - 0.005
+  const pending = cashNeeded - cashAmt          // negative means overpaid (change due)
+  const assigned = nonCashEffective + (paymentEnabled.efectivo ? cashAmt : 0)
+  const canCharge = cart.length > 0 && nonCashEffective + (paymentEnabled.efectivo ? cashAmt : 0) >= total - 0.005
 
   const activeMethod = !mixedMode
     ? (paymentEnabled.tarjeta ? 'tarjeta' : paymentEnabled.transferencia ? 'transferencia' : 'efectivo')
@@ -152,13 +224,17 @@ export default function Sales() {
     if (!shift || !user || cart.length === 0) return
     if (!canCharge) { setSaleStatus('Monto insuficiente'); return }
 
+    // Build payment breakdown using capped non-cash amounts
     const activePayments: Record<string, number> = {}
-    for (const [k, v] of Object.entries(payments)) {
-      if (paymentEnabled[k as keyof typeof paymentEnabled] && parseFloat(v) > 0) {
-        activePayments[k] = parseFloat(v)
+    let nonCashRemaining = nonCashEffective
+    for (const k of ['tarjeta', 'transferencia'] as const) {
+      if (paymentEnabled[k] && parseFloat(payments[k]) > 0 && nonCashRemaining > 0) {
+        const charge = Math.min(parseFloat(payments[k]) || 0, nonCashRemaining)
+        if (charge > 0.005) { activePayments[k] = charge; nonCashRemaining -= charge }
       }
     }
-    const isMixed = Object.keys(activePayments).length > 1
+    if (paymentEnabled.efectivo && cashAmt > 0) activePayments.efectivo = cashAmt
+    const isMixed = Object.keys(activePayments).filter(k => activePayments[k] > 0).length > 1
     const singleType = Object.keys(activePayments)[0] || 'efectivo'
 
     setShowPayModal(false)
@@ -182,15 +258,17 @@ export default function Sales() {
       const saleData = { ...res, items: cart, total, change, activeMethod, activePayments, isMixed }
       setLastSale(saleData)
       setShowReceiptModal(true)
-      // Clear cart immediately but keep lastSale alive for the receipt modal
+      // Clear cart and its localStorage snapshot
       setCart([])
+      try { if (shift) localStorage.removeItem(`cart_${shift.id}`) } catch {}
       setCodeInput('')
       setMixedMode(false)
       setPayments({ efectivo: '', tarjeta: '', transferencia: '' })
       setPaymentEnabled({ efectivo: true, tarjeta: false, transferencia: false })
       loadCashBalance()
     } else {
-      setSaleStatus('Error al procesar venta')
+      setSaleStatus('Error: ' + (res.message || 'Error al procesar venta'))
+      setTimeout(() => setSaleStatus(''), 4000)
     }
   }
 
@@ -317,6 +395,13 @@ export default function Sales() {
           Caja: {fmt(cashBalance)}
         </div>
         <button
+          onClick={openDailySales}
+          className="nm-btn"
+          style={{ padding: '6px 14px', fontSize: 12, fontWeight: 800 }}
+        >
+          📋 Ventas del Día
+        </button>
+        <button
           onClick={openCancelPanel}
           className="nm-btn"
           style={{ padding: '6px 14px', fontSize: 12, fontWeight: 800, color: '#cc2f2a' }}
@@ -328,6 +413,29 @@ export default function Sales() {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', gap: 12, padding: 12 }}>
         {/* Left: Cart */}
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, gap: 10 }}>
+          {/* Held carts tabs */}
+          {heldCarts.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {heldCarts.map(h => (
+                <div key={h.id} style={{ display: 'flex', alignItems: 'center', gap: 0, borderRadius: 10, overflow: 'hidden', boxShadow: 'var(--nm-raised-sm)' }}>
+                  <button
+                    onClick={() => switchToHeldCart(h.id)}
+                    style={{ padding: '6px 12px', fontSize: 12, fontWeight: 700, background: 'var(--nm-bg)', border: 'none', cursor: 'pointer', color: 'var(--nm-accent)' }}
+                  >
+                    🛒 {h.label}
+                  </button>
+                  <button
+                    onClick={() => discardHeldCart(h.id)}
+                    style={{ padding: '6px 8px', fontSize: 12, background: 'var(--nm-bg)', border: 'none', cursor: 'pointer', color: 'var(--nm-text-muted)', borderLeft: '1px solid var(--nm-separator)' }}
+                    title="Descartar ticket en espera"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Search bar */}
           <div style={{
             background: 'var(--nm-bg)',
@@ -380,9 +488,9 @@ export default function Sales() {
               onClick={handleNewSale}
               className="nm-btn"
               style={{ padding: '9px 14px', fontSize: 13, whiteSpace: 'nowrap' }}
-              title="Nueva venta (F2)"
+              title={cart.length > 0 ? 'Poner en espera y abrir nuevo ticket (F2)' : 'Nueva venta (F2)'}
             >
-              Nueva (F2)
+              {cart.length > 0 ? '⏸ En espera (F2)' : 'Nueva (F2)'}
             </button>
           </div>
 
@@ -799,8 +907,13 @@ export default function Sales() {
                   </div>
                 ))}
                 {change > 0 && (
-                  <div style={{ textAlign: 'right', fontSize: 14, fontWeight: 800, color: 'var(--nm-success)', marginTop: 4 }}>
-                    Cambio efectivo: {fmt(change)}
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    background: 'rgba(52,199,89,0.08)', borderRadius: 10, padding: '10px 12px',
+                    border: '1px solid rgba(52,199,89,0.2)', marginTop: 2,
+                  }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#1A8F3A' }}>CAMBIO (efectivo)</span>
+                    <span style={{ fontSize: 18, fontWeight: 900, color: '#1A8F3A' }}>{fmt(change)}</span>
                   </div>
                 )}
               </div>
@@ -961,6 +1074,79 @@ export default function Sales() {
             >
               Sin Ticket
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── VENTAS DEL DÍA PANEL ─────────────────────────────────── */}
+      {showDailySales && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 300,
+          background: 'rgba(0,0,0,0.45)',
+          display: 'flex', alignItems: 'flex-end',
+        }} onClick={e => { if (e.target === e.currentTarget) setShowDailySales(false) }}>
+          <div style={{
+            background: 'var(--nm-bg)', borderRadius: '24px 24px 0 0',
+            boxShadow: '0 -8px 40px rgba(0,0,0,0.18)',
+            width: '100%', maxHeight: '85vh',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid var(--nm-separator)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 900, color: 'var(--nm-text)' }}>Ventas del Día</div>
+                <div style={{ fontSize: 12, color: 'var(--nm-text-muted)', marginTop: 2 }}>
+                  {dailySales.filter(s => !s.cancelled).length} ventas · Total: {fmt(dailySales.filter(s => !s.cancelled).reduce((a, s) => a + s.total, 0))}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={async () => { await loadDailySales() }} className="nm-btn" style={{ padding: '6px 12px', fontSize: 12, color: 'var(--nm-accent)' }}>
+                  ↺ Actualizar
+                </button>
+                <button onClick={() => setShowDailySales(false)} style={{ width: 32, height: 32, borderRadius: '50%', border: 'none', background: 'var(--nm-bg)', boxShadow: 'var(--nm-raised-sm)', cursor: 'pointer', fontSize: 16, color: 'var(--nm-text-muted)' }}>✕</button>
+              </div>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '12px 24px' }}>
+              {dailySales.length === 0 && (
+                <div style={{ textAlign: 'center', color: 'var(--nm-text-muted)', padding: '40px 0', fontSize: 13 }}>Sin ventas hoy</div>
+              )}
+              {dailySales.map(sale => {
+                const isCancelled = !!sale.cancelled
+                return (
+                  <div key={sale.id} style={{
+                    border: `1.5px solid ${isCancelled ? 'transparent' : 'var(--nm-separator)'}`,
+                    borderRadius: 14, padding: '12px 16px', marginBottom: 8,
+                    background: isCancelled ? 'rgba(0,0,0,0.03)' : 'var(--nm-surface)',
+                    opacity: isCancelled ? 0.5 : 1,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: 'var(--nm-text-muted)' }}>{sale.folio}</span>
+                        {isCancelled && <span style={{ fontSize: 10, fontWeight: 800, color: '#cc2f2a', background: 'rgba(204,47,42,0.1)', padding: '2px 8px', borderRadius: 6 }}>CANCELADA</span>}
+                      </div>
+                      <span style={{ fontSize: 16, fontWeight: 900, color: isCancelled ? 'var(--nm-text-muted)' : 'var(--nm-text)' }}>{fmt(sale.total)}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 14, marginTop: 6, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 11, color: 'var(--nm-text-muted)' }}>
+                        🕐 {new Date(sale.timestamp).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      <span style={{ fontSize: 11, color: 'var(--nm-text-muted)', textTransform: 'capitalize' }}>💳 {sale.payment_type}</span>
+                      <span style={{ fontSize: 11, color: 'var(--nm-text-muted)' }}>👤 {sale.cashier_name}</span>
+                      <span style={{ fontSize: 11, color: 'var(--nm-text-muted)' }}>📦 {sale.items?.length || 0} artículos</span>
+                    </div>
+                    {sale.items?.length > 0 && (
+                      <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--nm-separator)' }}>
+                        {sale.items.map((item: any, i: number) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '1px 0', color: 'var(--nm-text-muted)' }}>
+                            <span>{item.product_name} × {item.quantity}</span>
+                            <span>{fmt(item.unit_price * item.quantity)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
       )}

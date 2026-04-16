@@ -381,6 +381,14 @@ export function registerIpcHandlers() {
       VALUES (?,?,?,?,?,?,?,?)
     `)
 
+    // Validate stock before deducting
+    for (const item of data.items) {
+      const p = db.prepare('SELECT stock, name FROM products WHERE id = ?').get(item.product_id) as any
+      if (p && p.stock < item.quantity) {
+        return { success: false, message: `Stock insuficiente: "${p.name}" (disponible: ${p.stock}, solicitado: ${item.quantity})` }
+      }
+    }
+
     let costTotal = 0
     for (const item of data.items) {
       const p = db.prepare('SELECT cost, stock FROM products WHERE id = ?').get(item.product_id) as any
@@ -973,10 +981,10 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('printer:printZPL', async (_, { zpl, printerName }: { zpl: string; printerName: string }) => {
-    // CUPS uses underscores; normalize spaces → underscores so either format works
-    const cupsName = printerName.trim().replace(/ /g, '_')
-    const tmpFile = join(tmpdir(), `labels_${Date.now()}.zpl`)
-    const tryCmd = (cmd: string) => new Promise<void>((resolve, reject) => {
+    const winName  = printerName.trim()
+    const cupsName = winName.replace(/ /g, '_')
+    const tmpFile  = join(tmpdir(), `labels_${Date.now()}.zpl`)
+    const tryCmd   = (cmd: string) => new Promise<void>((resolve, reject) => {
       exec(cmd, (err, _stdout, stderr) => {
         if (err) reject(new Error(stderr || err.message))
         else resolve()
@@ -984,19 +992,79 @@ export function registerIpcHandlers() {
     })
     try {
       writeFileSync(tmpFile, zpl, 'utf8')
+
+      if (process.platform === 'win32') {
+        // Windows: send raw ZPL using PowerShell + winspool API
+        const psFile = join(tmpdir(), `zpl_print_${Date.now()}.ps1`)
+        const safeWinName = winName.replace(/'/g, "''")
+        const safeTmpFile = tmpFile.replace(/\\/g, '\\\\')
+        const psScript = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class RawPrinter {
+    [DllImport("winspool.Drv", EntryPoint="OpenPrinterA", SetLastError=true, CharSet=CharSet.Ansi)]
+    public static extern bool OpenPrinter(string szPrinter, out IntPtr hPrinter, IntPtr pd);
+    [DllImport("winspool.Drv", EntryPoint="ClosePrinter", SetLastError=true)]
+    public static extern bool ClosePrinter(IntPtr hPrinter);
+    [DllImport("winspool.Drv", EntryPoint="StartDocPrinterA", SetLastError=true, CharSet=CharSet.Ansi)]
+    public static extern bool StartDocPrinter(IntPtr hPrinter, Int32 level, [In, MarshalAs(UnmanagedType.LPStruct)] DOCINFOA di);
+    [DllImport("winspool.Drv", EntryPoint="EndDocPrinter", SetLastError=true)]
+    public static extern bool EndDocPrinter(IntPtr hPrinter);
+    [DllImport("winspool.Drv", EntryPoint="StartPagePrinter", SetLastError=true)]
+    public static extern bool StartPagePrinter(IntPtr hPrinter);
+    [DllImport("winspool.Drv", EntryPoint="EndPagePrinter", SetLastError=true)]
+    public static extern bool EndPagePrinter(IntPtr hPrinter);
+    [DllImport("winspool.Drv", EntryPoint="WritePrinter", SetLastError=true)]
+    public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, Int32 dwCount, out Int32 dwWritten);
+}
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
+public class DOCINFOA {
+    [MarshalAs(UnmanagedType.LPStr)] public string pDocName;
+    [MarshalAs(UnmanagedType.LPStr)] public string pOutputFile;
+    [MarshalAs(UnmanagedType.LPStr)] public string pDataType;
+}
+'@
+$pName = '${safeWinName}'
+$fName = '${safeTmpFile}'
+$bytes = [System.IO.File]::ReadAllBytes($fName)
+$hPrinter = [IntPtr]::Zero
+if ([RawPrinter]::OpenPrinter($pName, [ref]$hPrinter, [IntPtr]::Zero)) {
+    $di = New-Object DOCINFOA; $di.pDocName = 'ZPL'; $di.pDataType = 'RAW'
+    if ([RawPrinter]::StartDocPrinter($hPrinter, 1, $di)) {
+        [RawPrinter]::StartPagePrinter($hPrinter) | Out-Null
+        $p = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
+        [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $p, $bytes.Length)
+        $w = 0; [RawPrinter]::WritePrinter($hPrinter, $p, $bytes.Length, [ref]$w) | Out-Null
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($p)
+        [RawPrinter]::EndPagePrinter($hPrinter) | Out-Null
+        [RawPrinter]::EndDocPrinter($hPrinter) | Out-Null
+    }
+    [RawPrinter]::ClosePrinter($hPrinter) | Out-Null
+    exit 0
+} else { exit 1 }
+`
+        writeFileSync(psFile, psScript, 'utf8')
+        try {
+          await tryCmd(`powershell -ExecutionPolicy Bypass -File "${psFile}"`)
+          try { unlinkSync(tmpFile) } catch {}
+          try { unlinkSync(psFile)  } catch {}
+          return { success: true }
+        } catch (e: any) {
+          try { unlinkSync(tmpFile) } catch {}
+          try { unlinkSync(psFile)  } catch {}
+          return { success: false, message: e.message }
+        }
+      }
+
+      // macOS / Linux: lp → lpr fallback
       let lastErr = ''
-      // Try lp with raw mode first, then lpr with literal (-l) mode as fallback
       for (const cmd of [
         `lp -d "${cupsName}" -o raw "${tmpFile}"`,
         `lpr -P "${cupsName}" -l "${tmpFile}"`,
       ]) {
-        try {
-          await tryCmd(cmd)
-          try { unlinkSync(tmpFile) } catch {}
-          return { success: true }
-        } catch (e: any) {
-          lastErr = e.message
-        }
+        try { await tryCmd(cmd); try { unlinkSync(tmpFile) } catch {}; return { success: true } }
+        catch (e: any) { lastErr = e.message }
       }
       try { unlinkSync(tmpFile) } catch {}
       return { success: false, message: lastErr }
