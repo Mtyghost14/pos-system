@@ -63,15 +63,15 @@ type Period = 'hoy' | 'semana' | 'mes' | 'mes_ant' | 'anio' | 'anio_ant' | 'cust
 
 function getPeriodDates(period: Period): { from: string; to: string } {
   const now = new Date()
-  const iso = (d: Date) => d.toISOString().slice(0, 10)
+  const local = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
   switch (period) {
-    case 'hoy':     return { from: iso(now), to: iso(now) }
-    case 'semana':  { const d = new Date(now); d.setDate(d.getDate() - 6); return { from: iso(d), to: iso(now) } }
-    case 'mes':     return { from: `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`, to: iso(now) }
-    case 'mes_ant': { const f = new Date(now.getFullYear(), now.getMonth()-1, 1); const l = new Date(now.getFullYear(), now.getMonth(), 0); return { from: iso(f), to: iso(l) } }
-    case 'anio':    return { from: `${now.getFullYear()}-01-01`, to: iso(now) }
+    case 'hoy':     return { from: local(now), to: local(now) }
+    case 'semana':  { const d = new Date(now); d.setDate(d.getDate() - 6); return { from: local(d), to: local(now) } }
+    case 'mes':     return { from: `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`, to: local(now) }
+    case 'mes_ant': { const f = new Date(now.getFullYear(), now.getMonth()-1, 1); const l = new Date(now.getFullYear(), now.getMonth(), 0); return { from: local(f), to: local(l) } }
+    case 'anio':    return { from: `${now.getFullYear()}-01-01`, to: local(now) }
     case 'anio_ant':{ const y = now.getFullYear()-1; return { from: `${y}-01-01`, to: `${y}-12-31` } }
-    default:        return { from: iso(now), to: iso(now) }
+    default:        return { from: local(now), to: local(now) }
   }
 }
 

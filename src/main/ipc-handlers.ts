@@ -443,8 +443,8 @@ export function registerIpcHandlers() {
     `
     const params: any[] = []
 
-    if (filters?.from) { query += ' AND DATE(s.timestamp) >= ?'; params.push(filters.from) }
-    if (filters?.to) { query += ' AND DATE(s.timestamp) <= ?'; params.push(filters.to) }
+    if (filters?.from) { query += " AND DATE(s.timestamp,'localtime') >= ?"; params.push(filters.from) }
+    if (filters?.to) { query += " AND DATE(s.timestamp,'localtime') <= ?"; params.push(filters.to) }
     if (filters?.shift_id) { query += ' AND s.shift_id = ?'; params.push(filters.shift_id) }
     if (filters?.cashier_id) { query += ' AND s.cashier_id = ?'; params.push(filters.cashier_id) }
     query += ' ORDER BY s.timestamp DESC'
@@ -659,42 +659,43 @@ export function registerIpcHandlers() {
 
   // ─── REPORTS ────────────────────────────────────────────────────────────────
   ipcMain.handle('reports:getDashboard', () => {
-    const todayStr = new Date().toISOString().slice(0, 10)
-    const yd = new Date(); yd.setDate(yd.getDate() - 1)
-    const yestStr = yd.toISOString().slice(0, 10)
-    const monthStart = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-01`
-    const lmEnd = new Date(new Date().getFullYear(), new Date().getMonth(), 0)
-    const lmStart = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1)
-    const iso = (d: Date) => d.toISOString().slice(0, 10)
+    const now = new Date()
+    const localDate = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+    const todayStr = localDate(now)
+    const yd = new Date(now); yd.setDate(yd.getDate() - 1)
+    const yestStr = localDate(yd)
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+    const lmEnd = new Date(now.getFullYear(), now.getMonth(), 0)
+    const lmStart = new Date(now.getFullYear(), now.getMonth() - 1, 1)
 
     const dayKpis = (from: string, to: string) => db.prepare(`
       SELECT COALESCE(SUM(total),0) as sales, COALESCE(SUM(total-cost_total),0) as profit,
              COUNT(*) as transactions, COALESCE(AVG(total),0) as avg_ticket,
              COALESCE(SUM(total-cost_total)/NULLIF(SUM(total),0)*100,0) as margin
-      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
     `).get(from, to) as any
 
     const today    = dayKpis(todayStr, todayStr)
     const yesterday = dayKpis(yestStr, yestStr)
     const thisMonth = dayKpis(monthStart, todayStr)
-    const lastMonth = dayKpis(iso(lmStart), iso(lmEnd))
+    const lastMonth = dayKpis(localDate(lmStart), localDate(lmEnd))
 
     const trend30 = db.prepare(`
-      SELECT DATE(timestamp) as date,
+      SELECT DATE(timestamp,'localtime') as date,
              COALESCE(SUM(total),0) as total,
              COALESCE(SUM(total-cost_total),0) as profit,
              COUNT(*) as transactions
       FROM sales
-      WHERE DATE(timestamp) >= DATE('now','-29 days')
-      GROUP BY DATE(timestamp) ORDER BY date
+      WHERE DATE(timestamp,'localtime') >= DATE('now','localtime','-29 days')
+      GROUP BY DATE(timestamp,'localtime') ORDER BY date
     `).all()
 
     // Fill missing days with zeros
     const trendMap = new Map((trend30 as any[]).map((r: any) => [r.date, r]))
     const trend: any[] = []
     for (let i = 29; i >= 0; i--) {
-      const d = new Date(); d.setDate(d.getDate() - i)
-      const key = iso(d)
+      const d = new Date(now); d.setDate(d.getDate() - i)
+      const key = localDate(d)
       trend.push(trendMap.get(key) || { date: key, total: 0, profit: 0, transactions: 0 })
     }
 
@@ -703,7 +704,7 @@ export function registerIpcHandlers() {
       FROM sale_items si
       JOIN sales s ON si.sale_id=s.id
       JOIN products p ON si.product_id=p.id
-      WHERE DATE(s.timestamp)=?
+      WHERE DATE(s.timestamp,'localtime')=?
       GROUP BY p.id ORDER BY revenue DESC LIMIT 8
     `).all(todayStr)
 
@@ -713,7 +714,7 @@ export function registerIpcHandlers() {
       FROM sales s
       LEFT JOIN users u ON s.cashier_id=u.id
       LEFT JOIN sale_items si ON si.sale_id=s.id
-      WHERE DATE(s.timestamp)=?
+      WHERE DATE(s.timestamp,'localtime')=?
       GROUP BY s.id ORDER BY s.timestamp DESC LIMIT 10
     `).all(todayStr)
 
@@ -724,10 +725,10 @@ export function registerIpcHandlers() {
     `).all()
 
     const byDayOfWeek = db.prepare(`
-      SELECT CAST(strftime('%w', timestamp) AS INTEGER) as dow,
+      SELECT CAST(strftime('%w', timestamp, 'localtime') AS INTEGER) as dow,
              COALESCE(SUM(total),0) as total, COUNT(*) as count
       FROM sales
-      WHERE DATE(timestamp) >= DATE('now','-90 days')
+      WHERE DATE(timestamp,'localtime') >= DATE('now','localtime','-90 days')
       GROUP BY dow ORDER BY dow
     `).all()
     const DOW_LABELS = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']
@@ -747,7 +748,7 @@ export function registerIpcHandlers() {
              COALESCE(SUM(si.quantity),0) as sold_30d
       FROM products p
       LEFT JOIN sale_items si ON si.product_id=p.id
-        AND si.sale_id IN (SELECT id FROM sales WHERE DATE(timestamp)>=DATE('now','-30 days'))
+        AND si.sale_id IN (SELECT id FROM sales WHERE DATE(timestamp,'localtime')>=DATE('now','localtime','-30 days'))
       WHERE p.active=1 AND p.stock > 0
       GROUP BY p.id HAVING sold_30d=0
       ORDER BY p.stock DESC LIMIT 10
@@ -766,18 +767,18 @@ export function registerIpcHandlers() {
         COALESCE(SUM(total - cost_total),0) as total_profit,
         COALESCE(AVG(total),0) as avg_ticket,
         COALESCE(AVG(CASE WHEN total > 0 THEN (total - cost_total)/total * 100 ELSE 0 END),0) as avg_margin
-      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
     `).get(from, to) as any
 
     const byDay = db.prepare(`
-      SELECT DATE(timestamp) as date, SUM(total) as total, SUM(total - cost_total) as profit
-      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
-      GROUP BY DATE(timestamp) ORDER BY date
+      SELECT DATE(timestamp,'localtime') as date, SUM(total) as total, SUM(total - cost_total) as profit
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
+      GROUP BY DATE(timestamp,'localtime') ORDER BY date
     `).all(from, to)
 
     const byPayment = db.prepare(`
       SELECT payment_type, SUM(total) as total, COUNT(*) as count
-      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
       GROUP BY payment_type
     `).all(from, to)
 
@@ -790,7 +791,7 @@ export function registerIpcHandlers() {
       JOIN sales s ON si.sale_id = s.id
       JOIN products p ON si.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE DATE(s.timestamp) BETWEEN ? AND ? AND (s.cancelled IS NULL OR s.cancelled = 0)
+      WHERE DATE(s.timestamp,'localtime') BETWEEN ? AND ? AND (s.cancelled IS NULL OR s.cancelled = 0)
       GROUP BY c.name ORDER BY total DESC
     `).all(from, to)
 
@@ -803,7 +804,7 @@ export function registerIpcHandlers() {
       JOIN sales s ON si.sale_id = s.id
       JOIN products p ON si.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE DATE(s.timestamp) BETWEEN ? AND ?
+      WHERE DATE(s.timestamp,'localtime') BETWEEN ? AND ?
       GROUP BY p.id ORDER BY total_revenue DESC LIMIT 10
     `).all(from, to)
 
@@ -817,13 +818,13 @@ export function registerIpcHandlers() {
       JOIN sales s ON si.sale_id = s.id
       JOIN products p ON si.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE DATE(s.timestamp) BETWEEN ? AND ?
+      WHERE DATE(s.timestamp,'localtime') BETWEEN ? AND ?
       GROUP BY p.id ORDER BY total_profit DESC LIMIT 10
     `).all(from, to)
 
     const byHour = db.prepare(`
-      SELECT CAST(strftime('%H', timestamp) AS INTEGER) as hour, SUM(total) as total, COUNT(*) as count
-      FROM sales WHERE DATE(timestamp) BETWEEN ? AND ?
+      SELECT CAST(strftime('%H', timestamp, 'localtime') AS INTEGER) as hour, SUM(total) as total, COUNT(*) as count
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
       GROUP BY hour ORDER BY hour
     `).all(from, to)
 
@@ -914,8 +915,8 @@ export function registerIpcHandlers() {
       WHERE 1=1
     `
     const params: any[] = []
-    if (filters?.from) { query += ' AND DATE(s.timestamp) >= ?'; params.push(filters.from) }
-    if (filters?.to) { query += ' AND DATE(s.timestamp) <= ?'; params.push(filters.to) }
+    if (filters?.from) { query += " AND DATE(s.timestamp,'localtime') >= ?"; params.push(filters.from) }
+    if (filters?.to) { query += " AND DATE(s.timestamp,'localtime') <= ?"; params.push(filters.to) }
     query += ' ORDER BY s.timestamp DESC'
     return db.prepare(query).all(...params)
   })
@@ -997,7 +998,7 @@ export function registerIpcHandlers() {
         // Windows: send raw ZPL using PowerShell + winspool API
         const psFile = join(tmpdir(), `zpl_print_${Date.now()}.ps1`)
         const safeWinName = winName.replace(/'/g, "''")
-        const safeTmpFile = tmpFile.replace(/\\/g, '\\\\')
+        const safeTmpFile = tmpFile.replace(/'/g, "''")
         const psScript = `
 Add-Type -TypeDefinition @'
 using System;
@@ -1074,75 +1075,61 @@ if ([RawPrinter]::OpenPrinter($pName, [ref]$hPrinter, [IntPtr]::Zero)) {
     }
   })
 
-  ipcMain.handle('printer:printReceipt', async (_, data: any) => {
-    // Merge stored settings so font size / show toggles are always applied
-    const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
-    const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
-    const mergedData = { ...stored, ...data }
-    return new Promise<{ success: boolean; message?: string }>((resolve) => {
+  // Helper: write HTML to a temp file and print it in a hidden BrowserWindow.
+  // Using loadFile() instead of loadURL('data:...') avoids Windows URL-length/encoding issues.
+  function printHtmlFile(html: string, printerName: string, winOpts: { width: number; height: number }): Promise<{ success: boolean; message?: string }> {
+    const htmlFile = join(tmpdir(), `print_${Date.now()}.html`)
+    writeFileSync(htmlFile, html, 'utf8')
+    return new Promise((resolve) => {
       const win = new BrowserWindow({
-        width: 320,
-        height: 800,
+        ...winOpts,
         show: false,
         webPreferences: { nodeIntegration: false, contextIsolation: true },
       })
-      const html = buildReceiptHTML(mergedData)
-      const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
-      win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+      win.loadFile(htmlFile)
       win.webContents.on('did-finish-load', () => {
-        const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
-        if (printerName) printOpts.deviceName = printerName
-        win.webContents.print(printOpts, (success, reason) => {
-          win.destroy()
-          resolve(success ? { success: true } : { success: false, message: reason })
-        })
+        // Small delay so the renderer finishes painting before we capture
+        setTimeout(() => {
+          const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
+          if (printerName) printOpts.deviceName = printerName
+          win.webContents.print(printOpts, (success, reason) => {
+            win.destroy()
+            try { unlinkSync(htmlFile) } catch {}
+            resolve(success ? { success: true } : { success: false, message: reason })
+          })
+        }, 500)
       })
-      win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
+      win.on('closed', () => {
+        try { unlinkSync(htmlFile) } catch {}
+        resolve({ success: false, message: 'Ventana cerrada' })
+      })
     })
+  }
+
+  ipcMain.handle('printer:printReceipt', async (_, data: any) => {
+    const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
+    const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
+    const mergedData = { ...stored, ...data }
+    const html = buildReceiptHTML(mergedData)
+    const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
+    return printHtmlFile(html, printerName, { width: 320, height: 800 })
   })
 
   ipcMain.handle('printer:printShift', async (_, data: any) => {
     const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
     const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
     const mergedData = { ...stored, ...data }
-    return new Promise<{ success: boolean; message?: string }>((resolve) => {
-      const win = new BrowserWindow({
-        width: 320, height: 900, show: false,
-        webPreferences: { nodeIntegration: false, contextIsolation: true },
-      })
-      const html = buildShiftHTML(mergedData)
-      const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
-      win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-      win.webContents.on('did-finish-load', () => {
-        const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
-        if (printerName) printOpts.deviceName = printerName
-        win.webContents.print(printOpts, (success, reason) => {
-          win.destroy()
-          resolve(success ? { success: true } : { success: false, message: reason })
-        })
-      })
-      win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
-    })
+    const html = buildShiftHTML(mergedData)
+    const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
+    return printHtmlFile(html, printerName, { width: 320, height: 900 })
   })
 
   ipcMain.handle('printer:printDailyCorte', async (_, dailyData: any) => {
     const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
     const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
     const printerName = (stored.printer_port || '').trim()
-    return new Promise<{ success: boolean; message?: string }>((resolve) => {
-      const win = new BrowserWindow({ width: 320, height: 900, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true } })
-      const html = buildDailyCorteHTML(dailyData, stored)
-      win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-      win.webContents.on('did-finish-load', () => {
-        const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
-        if (printerName) printOpts.deviceName = printerName
-        win.webContents.print(printOpts, (success, reason) => {
-          win.destroy()
-          resolve(success ? { success: true } : { success: false, message: reason })
-        })
-      })
-      win.on('closed', () => resolve({ success: false, message: 'Ventana cerrada' }))
-    })
+    const html = buildDailyCorteHTML(dailyData, stored)
+    return printHtmlFile(html, printerName, { width: 320, height: 900 })
   })
 
   // ─── EXCEL ──────────────────────────────────────────────────────────────────

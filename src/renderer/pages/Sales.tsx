@@ -160,7 +160,8 @@ export default function Sales() {
   }
 
   const loadDailySales = async () => {
-    const today = new Date().toISOString().slice(0, 10)
+    const d = new Date()
+    const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
     const res = await window.api.getSales({ from: today, to: today, includeItems: true })
     setDailySales(res)
   }
@@ -288,7 +289,8 @@ export default function Sales() {
   }
 
   const loadTodaySales = async () => {
-    const today = new Date().toISOString().slice(0, 10)
+    const d = new Date()
+    const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
     const res = await window.api.getSales({ from: today, to: today, includeItems: true })
     setTodaySales(res)
   }

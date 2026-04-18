@@ -1,6 +1,6 @@
 {
   "name": "pos-system",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "description": "Sistema de Punto de Venta para tienda mexicana",
   "main": "dist-electron/main.js",
   "scripts": {
