@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'          # triggers on tags like v1.0.7, v1.0.8, etc.
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
