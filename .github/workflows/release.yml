@@ -1,0 +1,31 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'          # triggers on tags like v1.0.7, v1.0.8, etc.
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Rebuild native modules for Electron
+        run: npm run rebuild
+
+      - name: Build & publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run dist -- --publish always
