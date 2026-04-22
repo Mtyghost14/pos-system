@@ -100,6 +100,12 @@ const api = {
   onAppClosing: (cb: () => void) => ipcRenderer.on('app:closing', cb),
   allowClose: () => ipcRenderer.send('app:allow-close'),
 
+  // Auto-updater
+  onUpdateAvailable: (cb: (info: { version: string }) => void) => ipcRenderer.on('update:available', (_, d) => cb(d)),
+  onUpdateProgress: (cb: (info: { percent: number }) => void) => ipcRenderer.on('update:progress', (_, d) => cb(d)),
+  onUpdateReady: (cb: (info: { version: string }) => void) => ipcRenderer.on('update:ready', (_, d) => cb(d)),
+  installUpdate: () => ipcRenderer.send('update:install'),
+
   // Backup
   createBackup: () => ipcRenderer.invoke('backup:create'),
   getBackups: () => ipcRenderer.invoke('backup:list'),

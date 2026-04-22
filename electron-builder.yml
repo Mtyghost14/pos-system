@@ -49,4 +49,7 @@ npmRebuild: false  # Handled by electron-rebuild in CI
 
 publish:
   provider: github
+  owner: Mtyghost14
+  repo: pos-system
   releaseType: release
+  private: false

@@ -85,6 +85,65 @@ function CloseGuard() {
   )
 }
 
+function UpdateBanner() {
+  const [state, setState] = useState<'idle' | 'available' | 'downloading' | 'ready'>('idle')
+  const [version, setVersion] = useState('')
+  const [percent, setPercent] = useState(0)
+  const [dismissed, setDismissed] = useState(false)
+
+  useEffect(() => {
+    window.api.onUpdateAvailable((info) => {
+      setVersion(info.version)
+      setState('available')
+    })
+    window.api.onUpdateProgress((info) => {
+      setPercent(info.percent)
+      setState('downloading')
+    })
+    window.api.onUpdateReady((info) => {
+      setVersion(info.version)
+      setState('ready')
+    })
+  }, [])
+
+  if (state === 'idle' || dismissed) return null
+
+  const bannerStyle: React.CSSProperties = {
+    position: 'fixed', bottom: 16, right: 16, zIndex: 9998,
+    background: state === 'ready' ? '#1a7f37' : '#0969da',
+    color: '#fff', borderRadius: 10,
+    padding: '12px 18px', display: 'flex', alignItems: 'center', gap: 12,
+    boxShadow: '0 4px 20px rgba(0,0,0,0.25)', fontSize: 13, maxWidth: 360,
+  }
+
+  return (
+    <div style={bannerStyle}>
+      <div style={{ flex: 1 }}>
+        {state === 'available' && <><b>Actualización v{version} disponible</b> — descargando...</>}
+        {state === 'downloading' && <><b>Descargando actualización v{version}...</b> {percent}%</>}
+        {state === 'ready' && <><b>v{version} lista para instalar.</b> Se instalará al cerrar el programa.</>}
+      </div>
+      {state === 'ready' && (
+        <button
+          onClick={() => window.api.installUpdate()}
+          style={{
+            background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
+            borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontWeight: 700, fontSize: 12,
+          }}
+        >
+          Reiniciar ahora
+        </button>
+      )}
+      <button
+        onClick={() => setDismissed(true)}
+        style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.7)', cursor: 'pointer', fontSize: 16, padding: 0 }}
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
 export default function App() {
   const { loadSettings } = useSettingsStore()
 
@@ -95,6 +154,7 @@ export default function App() {
   return (
     <HashRouter>
       <CloseGuard />
+      <UpdateBanner />
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>

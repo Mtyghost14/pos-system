@@ -3,6 +3,7 @@ import { join } from 'path'
 import { initDatabase } from './database'
 import { registerIpcHandlers } from './ipc-handlers'
 import { setupBackup } from './backup'
+import { autoUpdater } from 'electron-updater'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -62,6 +63,36 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+
+  // Auto-updater (only in packaged app, not during development)
+  if (process.env.NODE_ENV !== 'development') {
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+
+    autoUpdater.on('update-available', (info) => {
+      mainWindow?.webContents.send('update:available', { version: info.version })
+    })
+
+    autoUpdater.on('download-progress', (progress) => {
+      mainWindow?.webContents.send('update:progress', { percent: Math.round(progress.percent) })
+    })
+
+    autoUpdater.on('update-downloaded', (info) => {
+      mainWindow?.webContents.send('update:ready', { version: info.version })
+    })
+
+    autoUpdater.on('error', (err) => {
+      console.error('AutoUpdater error:', err.message)
+    })
+
+    // Check on startup (after a short delay so the window is ready)
+    setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000)
+  }
+})
+
+// Renderer can trigger install when the user clicks "Reiniciar y actualizar"
+ipcMain.on('update:install', () => {
+  autoUpdater.quitAndInstall()
 })
 
 app.on('window-all-closed', () => {

@@ -300,7 +300,7 @@ function ZebraSettings({ showMsg }: any) {
       '^FO30,80^A0N,30,30^FDEtiquetadora OK^FS',
       '^XZ',
     ].join('\n')
-    const printerName = selected.replace(/ /g, '_')
+    const printerName = selected.trim()
     const res = await (window.api as any).printZPL({ zpl: testZPL, printerName })
     setTesting(false)
     if (res?.success) showMsg('Prueba enviada a la impresora')

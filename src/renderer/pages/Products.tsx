@@ -1306,7 +1306,7 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
     // Always fetch fresh settings so a newly saved printer is picked up without page reload
     const freshSettings = await window.api.getSettings()
     const freshPrinter = (freshSettings?.label_printer || zebraPrinter || '').trim()
-    const printerName = freshPrinter.replace(/ /g, '_')
+    const printerName = freshPrinter
     if (!printerName) {
       setPrintMsg({ ok: false, text: 'Configura la impresora Zebra en Configuración → Tickets y Etiquetas' })
       return

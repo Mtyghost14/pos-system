@@ -995,56 +995,46 @@ export function registerIpcHandlers() {
       writeFileSync(tmpFile, zpl, 'utf8')
 
       if (process.platform === 'win32') {
-        // Windows: send raw ZPL using PowerShell + winspool API
+        // Windows: send raw ZPL directly to printer port — no C# compilation needed.
+        // Looks up the Windows printer by name → gets its port → writes bytes directly.
+        // Supports USB/LPT ports and TCP/IP network printers.
         const psFile = join(tmpdir(), `zpl_print_${Date.now()}.ps1`)
         const safeWinName = winName.replace(/'/g, "''")
         const safeTmpFile = tmpFile.replace(/'/g, "''")
-        const psScript = `
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public class RawPrinter {
-    [DllImport("winspool.Drv", EntryPoint="OpenPrinterA", SetLastError=true, CharSet=CharSet.Ansi)]
-    public static extern bool OpenPrinter(string szPrinter, out IntPtr hPrinter, IntPtr pd);
-    [DllImport("winspool.Drv", EntryPoint="ClosePrinter", SetLastError=true)]
-    public static extern bool ClosePrinter(IntPtr hPrinter);
-    [DllImport("winspool.Drv", EntryPoint="StartDocPrinterA", SetLastError=true, CharSet=CharSet.Ansi)]
-    public static extern bool StartDocPrinter(IntPtr hPrinter, Int32 level, [In, MarshalAs(UnmanagedType.LPStruct)] DOCINFOA di);
-    [DllImport("winspool.Drv", EntryPoint="EndDocPrinter", SetLastError=true)]
-    public static extern bool EndDocPrinter(IntPtr hPrinter);
-    [DllImport("winspool.Drv", EntryPoint="StartPagePrinter", SetLastError=true)]
-    public static extern bool StartPagePrinter(IntPtr hPrinter);
-    [DllImport("winspool.Drv", EntryPoint="EndPagePrinter", SetLastError=true)]
-    public static extern bool EndPagePrinter(IntPtr hPrinter);
-    [DllImport("winspool.Drv", EntryPoint="WritePrinter", SetLastError=true)]
-    public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, Int32 dwCount, out Int32 dwWritten);
-}
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
-public class DOCINFOA {
-    [MarshalAs(UnmanagedType.LPStr)] public string pDocName;
-    [MarshalAs(UnmanagedType.LPStr)] public string pOutputFile;
-    [MarshalAs(UnmanagedType.LPStr)] public string pDataType;
-}
-'@
-$pName = '${safeWinName}'
-$fName = '${safeTmpFile}'
-$bytes = [System.IO.File]::ReadAllBytes($fName)
-$hPrinter = [IntPtr]::Zero
-if ([RawPrinter]::OpenPrinter($pName, [ref]$hPrinter, [IntPtr]::Zero)) {
-    $di = New-Object DOCINFOA; $di.pDocName = 'ZPL'; $di.pDataType = 'RAW'
-    if ([RawPrinter]::StartDocPrinter($hPrinter, 1, $di)) {
-        [RawPrinter]::StartPagePrinter($hPrinter) | Out-Null
-        $p = [Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)
-        [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $p, $bytes.Length)
-        $w = 0; [RawPrinter]::WritePrinter($hPrinter, $p, $bytes.Length, [ref]$w) | Out-Null
-        [Runtime.InteropServices.Marshal]::FreeHGlobal($p)
-        [RawPrinter]::EndPagePrinter($hPrinter) | Out-Null
-        [RawPrinter]::EndDocPrinter($hPrinter) | Out-Null
-    }
-    [RawPrinter]::ClosePrinter($hPrinter) | Out-Null
-    exit 0
-} else { exit 1 }
-`
+        // Build the PS script as a regular string (not template) to keep backslash counts predictable.
+        // In PowerShell: single-quoted strings are 100% literal (only '' escapes a quote).
+        // Device path prefix for USB/LPT ports is \\.\  which is the 4-char sequence: \, \, ., \
+        const psScript = [
+          `$ErrorActionPreference = 'Stop'`,
+          `$pName = '${safeWinName}'`,
+          `$fPath = '${safeTmpFile}'`,
+          `$bytes = [System.IO.File]::ReadAllBytes($fPath)`,
+          ``,
+          `function Send-Bytes([byte[]]$data, [string]$port) {`,
+          `    if ($port -match '^IP_(.+)$') {`,
+          `        $ip = $Matches[1]`,
+          `        $tcp = New-Object System.Net.Sockets.TcpClient($ip, 9100)`,
+          `        $ns = $tcp.GetStream()`,
+          `        $ns.Write($data, 0, $data.Length)`,
+          `        $ns.Flush(); $tcp.Close(); return`,
+          `    }`,
+          `    if ($port -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$') {`,
+          `        $tcp = New-Object System.Net.Sockets.TcpClient($port, 9100)`,
+          `        $ns = $tcp.GetStream()`,
+          `        $ns.Write($data, 0, $data.Length)`,
+          `        $ns.Flush(); $tcp.Close(); return`,
+          `    }`,
+          `    # USB/LPT: write directly to \\.\PORT`,
+          `    $dev = '\\\\.' + '\\' + $port`,
+          `    $fs = [System.IO.File]::Open($dev, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)`,
+          `    $fs.Write($data, 0, $data.Length); $fs.Flush(); $fs.Close()`,
+          `}`,
+          ``,
+          `$printer = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq $pName } | Select-Object -First 1`,
+          `if ($printer) { Send-Bytes $bytes $printer.PortName; exit 0 }`,
+          `Send-Bytes $bytes $pName`,
+          `exit 0`,
+        ].join('\n')
         writeFileSync(psFile, psScript, 'utf8')
         try {
           await tryCmd(`powershell -ExecutionPolicy Bypass -File "${psFile}"`)
