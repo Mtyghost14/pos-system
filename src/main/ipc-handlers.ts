@@ -1070,28 +1070,48 @@ export function registerIpcHandlers() {
   function printHtmlFile(html: string, printerName: string, winOpts: { width: number; height: number }): Promise<{ success: boolean; message?: string }> {
     const htmlFile = join(tmpdir(), `print_${Date.now()}.html`)
     writeFileSync(htmlFile, html, 'utf8')
+    let resolved = false
     return new Promise((resolve) => {
+      const done = (result: { success: boolean; message?: string }) => {
+        if (resolved) return
+        resolved = true
+        resolve(result)
+      }
       const win = new BrowserWindow({
         ...winOpts,
         show: false,
         webPreferences: { nodeIntegration: false, contextIsolation: true },
       })
-      win.loadFile(htmlFile)
-      win.webContents.on('did-finish-load', () => {
-        // Small delay so the renderer finishes painting before we capture
+
+      const doPrint = () => {
+        // Wait for the renderer to fully paint (Windows needs more time)
         setTimeout(() => {
+          if (resolved) return
           const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
           if (printerName) printOpts.deviceName = printerName
           win.webContents.print(printOpts, (success, reason) => {
             win.destroy()
             try { unlinkSync(htmlFile) } catch {}
-            resolve(success ? { success: true } : { success: false, message: reason })
+            done(success ? { success: true } : { success: false, message: reason || 'Impresión falló' })
           })
-        }, 500)
-      })
+        }, 1500)
+      }
+
+      win.loadFile(htmlFile)
+      win.webContents.on('did-finish-load', doPrint)
+
+      // Timeout safety: if nothing happens in 10s, fail gracefully
+      setTimeout(() => {
+        if (!resolved) {
+          try { win.destroy() } catch {}
+          try { unlinkSync(htmlFile) } catch {}
+          done({ success: false, message: 'Timeout: la ventana de impresión no respondió' })
+        }
+      }, 10000)
+
       win.on('closed', () => {
         try { unlinkSync(htmlFile) } catch {}
-        resolve({ success: false, message: 'Ventana cerrada' })
+        done({ success: false, message: 'Ventana cerrada' })
       })
     })
   }
