@@ -1118,13 +1118,63 @@ export function registerIpcHandlers() {
     })
   }
 
+  // Send raw bytes to a Windows printer using Win32 WritePrinter (RAW data type).
+  // Bypasses GDI/PDF rendering pipeline — required for ESC/POS thermal printers.
+  function printRawBytes(printerName: string, data: Buffer): Promise<{ success: boolean; message?: string }> {
+    const tmpBin = join(tmpdir(), `escpos_${Date.now()}.bin`)
+    const tmpPs  = join(tmpdir(), `escpos_${Date.now()}.ps1`)
+    writeFileSync(tmpBin, data)
+    const safeName = printerName.replace(/'/g, "''")
+    const safeBin  = tmpBin.replace(/'/g, "''")
+    const ps = [
+      `$ErrorActionPreference='Stop'`,
+      `Add-Type -TypeDefinition @"`,
+      `using System; using System.Runtime.InteropServices;`,
+      `public class RawPrint {`,
+      `  [DllImport("winspool.drv",CharSet=CharSet.Unicode)] public static extern bool OpenPrinter(string n,out IntPtr h,IntPtr d);`,
+      `  [DllImport("winspool.drv")] public static extern bool ClosePrinter(IntPtr h);`,
+      `  [DllImport("winspool.drv",CharSet=CharSet.Unicode)] public static extern bool StartDocPrinter(IntPtr h,int lv,ref DOCINFO i);`,
+      `  [DllImport("winspool.drv")] public static extern bool EndDocPrinter(IntPtr h);`,
+      `  [DllImport("winspool.drv")] public static extern bool StartPagePrinter(IntPtr h);`,
+      `  [DllImport("winspool.drv")] public static extern bool EndPagePrinter(IntPtr h);`,
+      `  [DllImport("winspool.drv")] public static extern bool WritePrinter(IntPtr h,byte[] b,int c,out int w);`,
+      `  [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] public struct DOCINFO {`,
+      `    [MarshalAs(UnmanagedType.LPWStr)] public string pDocName;`,
+      `    [MarshalAs(UnmanagedType.LPWStr)] public string pOutputFile;`,
+      `    [MarshalAs(UnmanagedType.LPWStr)] public string pDataType; } }`,
+      `"@`,
+      `$bytes=[System.IO.File]::ReadAllBytes('${safeBin}')`,
+      `$h=[IntPtr]::Zero`,
+      `[RawPrint]::OpenPrinter('${safeName}',[ref]$h,[IntPtr]::Zero)|Out-Null`,
+      `$doc=New-Object RawPrint+DOCINFO`,
+      `$doc.pDocName='Receipt'; $doc.pDataType='RAW'`,
+      `[RawPrint]::StartDocPrinter($h,1,[ref]$doc)|Out-Null`,
+      `[RawPrint]::StartPagePrinter($h)|Out-Null`,
+      `$w=0; [RawPrint]::WritePrinter($h,$bytes,$bytes.Length,[ref]$w)|Out-Null`,
+      `[RawPrint]::EndPagePrinter($h)|Out-Null`,
+      `[RawPrint]::EndDocPrinter($h)|Out-Null`,
+      `[RawPrint]::ClosePrinter($h)|Out-Null`,
+    ].join('\n')
+    writeFileSync(tmpPs, ps, 'utf8')
+    return new Promise((resolve) => {
+      exec(`powershell -ExecutionPolicy Bypass -File "${tmpPs}"`, (err, _out, stderr) => {
+        try { unlinkSync(tmpBin) } catch {}
+        try { unlinkSync(tmpPs)  } catch {}
+        if (err) resolve({ success: false, message: stderr || err.message })
+        else     resolve({ success: true })
+      })
+    })
+  }
+
   ipcMain.handle('printer:printReceipt', async (_, data: any) => {
     const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
     const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
     const mergedData = { ...stored, ...data }
-    const html = buildReceiptHTML(mergedData)
     const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
-    return printHtmlFile(html, printerName, { width: 320, height: 800 })
+    if (process.platform === 'win32' && printerName) {
+      return printRawBytes(printerName, buildReceiptESCPOS(mergedData))
+    }
+    return printHtmlFile(buildReceiptHTML(mergedData), printerName, { width: 320, height: 800 })
   })
 
   ipcMain.handle('printer:printShift', async (_, data: any) => {
@@ -1355,6 +1405,77 @@ function generateCFDIXml(data: any): string {
       Importe="${data.total}" ObjetoImp="01"/>
   </cfdi:Conceptos>
 </cfdi:Comprobante>`
+}
+
+function buildReceiptESCPOS(data: any): Buffer {
+  const fmt  = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  const norm = (s: string)  => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?')
+  const COLS = 42
+  const ESC = 0x1b, GS = 0x1d, LF = 0x0a
+
+  const parts: Buffer[] = []
+  const raw  = (...b: number[]) => parts.push(Buffer.from(b))
+  const text = (s: string)      => parts.push(Buffer.from(norm(s).substring(0, COLS), 'ascii'))
+  const line = (s: string)      => { text(s); raw(LF) }
+  const div  = ()               => line('-'.repeat(COLS))
+  const two  = (l: string, r: string) => {
+    const right = norm(r)
+    const left  = norm(l).substring(0, COLS - right.length - 1)
+    const pad   = COLS - left.length - right.length
+    parts.push(Buffer.from(left + ' '.repeat(Math.max(1, pad)) + right, 'ascii'))
+    raw(LF)
+  }
+
+  raw(ESC, 0x40)                          // initialize
+
+  raw(ESC, 0x61, 0x01, ESC, 0x45, 0x01, ESC, 0x21, 0x10)  // center + bold + 2x height
+  line(data.storeName || data.store_name || 'Mi Tienda')
+  raw(ESC, 0x21, 0x00, ESC, 0x45, 0x00)  // normal
+
+  raw(ESC, 0x61, 0x01)
+  if (data.storeAddress || data.store_address) line(data.storeAddress || data.store_address)
+  if (data.storePhone   || data.store_phone)   line(`Tel: ${data.storePhone || data.store_phone}`)
+
+  raw(ESC, 0x61, 0x00)                    // left align
+  div()
+  line(`Fecha: ${data.date}`)
+  if (data.receipt_show_folio   !== '0') line(`Folio: ${data.folio}`)
+  if (data.receipt_show_cashier !== '0') line(`Cajero: ${data.cashierName || ''}`)
+  div()
+
+  for (const item of (data.items || [])) {
+    two(`${item.qty}x ${item.name}`, fmt(item.qty * item.price))
+    if (item.discount > 0) line(`  Desc: -${fmt(item.discount * item.qty)}`)
+  }
+  div()
+
+  raw(ESC, 0x45, 0x01, ESC, 0x21, 0x10)  // bold + 2x height
+  two('TOTAL', fmt(data.total))
+  raw(ESC, 0x21, 0x00, ESC, 0x45, 0x00)
+  div()
+
+  if (data.isMixed && data.activePayments) {
+    for (const [method, amount] of Object.entries(data.activePayments as Record<string, number>)) {
+      two(method.charAt(0).toUpperCase() + method.slice(1), fmt(amount))
+    }
+  } else {
+    const lbl = (data.paymentType || 'Efectivo')
+    two(lbl.charAt(0).toUpperCase() + lbl.slice(1), fmt(data.received || data.total))
+  }
+  if ((data.change ?? 0) > 0) {
+    raw(ESC, 0x45, 0x01)
+    two('CAMBIO', fmt(data.change))
+    raw(ESC, 0x45, 0x00)
+  }
+  div()
+
+  raw(ESC, 0x61, 0x01)
+  line(data.footer || data.receipt_footer || 'Gracias por su compra!')
+
+  raw(ESC, 0x64, 4)             // feed 4 lines
+  raw(GS, 0x56, 0x42, 0x00)    // partial cut
+
+  return Buffer.concat(parts)
 }
 
 function buildReceiptHTML(data: any): string {
