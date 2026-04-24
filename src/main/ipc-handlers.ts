@@ -1415,7 +1415,7 @@ function buildReceiptHTML(data: any): string {
   .divider { border-top: 1px solid #000; margin: 4px 0; }
   .total-row { font-size: ${fontTotal}px; font-weight: 900; display: flex; justify-content: space-between; padding: 3px 0; }
   @media print {
-    @page { margin: 0; size: 80mm auto; }
+    @page { margin: 0; size: 80mm 2000mm; }
     body { padding: 2mm; }
   }
 </style>
@@ -1550,7 +1550,7 @@ function buildShiftHTML(data: any): string {
   .note    { font-size: ${fontBase - 2}px; font-weight: 500; color: #555; padding: 2px 0; }
   .total   { font-size: ${fontBase + 2}px; font-weight: 700; padding: 4px 0; border-top: 1px solid #000; margin-top: 3px; }
   @media print {
-    @page { margin: 0; size: 80mm auto; }
+    @page { margin: 0; size: 80mm 2000mm; }
     body  { padding: 3mm; }
   }
 </style>
@@ -1680,7 +1680,7 @@ function buildDailyCorteHTML(data: any, stored: any): string {
   .row.bold{ font-weight:700; font-size:${fontBase+1}px; }
   .note    { font-size:${fontBase-2}px; font-weight:500; color:#555; padding:2px 0; }
   .total   { font-size:${fontBase+2}px; font-weight:700; padding:4px 0; border-top:1px solid #000; margin-top:3px; }
-  @media print { @page { margin:0; size:80mm auto; } body { padding:3mm; } }
+  @media print { @page { margin:0; size:80mm 2000mm; } body { padding:3mm; } }
 </style></head><body>
   <div class="store">${stored.store_name || 'Mi Tienda'}</div>
   ${stored.store_address ? `<div class="sub">${stored.store_address}</div>` : ''}
