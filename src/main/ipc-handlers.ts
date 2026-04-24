@@ -1087,7 +1087,9 @@ export function registerIpcHandlers() {
         // Wait for the renderer to fully paint (Windows needs more time)
         setTimeout(() => {
           if (resolved) return
-          const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
+          // pageSize overrides the Windows printer default (Letter) at the job level.
+          // 72mm x Recibo = 71882 x 3002788 microns — matches the Star TSP100 driver's supported size.
+          const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' }, pageSize: { width: 71882, height: 3002788 } }
           if (printerName) printOpts.deviceName = printerName
           win.webContents.print(printOpts, (success, reason) => {
             done(success ? { success: true } : { success: false, message: reason || 'Impresión falló' })
@@ -1405,7 +1407,7 @@ function buildReceiptHTML(data: any): string {
     font-weight: 700;
     color: #000;
     background: #fff;
-    width: 76mm;
+    width: 68mm;
     padding: 3mm;
   }
   h1 { font-size: ${fontH1}px; text-align: center; font-weight: 900; margin-bottom: 1px; }
@@ -1415,7 +1417,7 @@ function buildReceiptHTML(data: any): string {
   .divider { border-top: 1px solid #000; margin: 4px 0; }
   .total-row { font-size: ${fontTotal}px; font-weight: 900; display: flex; justify-content: space-between; padding: 3px 0; }
   @media print {
-    @page { margin: 0; size: 80mm 2000mm; }
+    @page { margin: 0; }
     body { padding: 2mm; }
   }
 </style>
@@ -1536,7 +1538,7 @@ function buildShiftHTML(data: any): string {
     text-align: center;
     color: #000;
     background: #fff;
-    width: 76mm;
+    width: 68mm;
     margin: 0 auto;
     padding: 4mm;
   }
@@ -1550,7 +1552,7 @@ function buildShiftHTML(data: any): string {
   .note    { font-size: ${fontBase - 2}px; font-weight: 500; color: #555; padding: 2px 0; }
   .total   { font-size: ${fontBase + 2}px; font-weight: 700; padding: 4px 0; border-top: 1px solid #000; margin-top: 3px; }
   @media print {
-    @page { margin: 0; size: 80mm 2000mm; }
+    @page { margin: 0; }
     body  { padding: 3mm; }
   }
 </style>
@@ -1670,7 +1672,7 @@ function buildDailyCorteHTML(data: any, stored: any): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
   * { box-sizing:border-box; margin:0; padding:0; }
-  body { font-family:'Courier New',Courier,monospace; font-size:${fontBase}px; font-weight:500; line-height:1.5; text-align:center; color:#000; background:#fff; width:76mm; margin:0 auto; padding:4mm; }
+  body { font-family:'Courier New',Courier,monospace; font-size:${fontBase}px; font-weight:500; line-height:1.5; text-align:center; color:#000; background:#fff; width:68mm; margin:0 auto; padding:4mm; }
   .store   { font-size:${fontBase+6}px; font-weight:700; margin-bottom:3px; }
   .sub     { font-size:${fontBase-2}px; font-weight:600; color:#333; }
   .divider { border-top:1px solid #000; margin:6px 0; }
@@ -1680,7 +1682,7 @@ function buildDailyCorteHTML(data: any, stored: any): string {
   .row.bold{ font-weight:700; font-size:${fontBase+1}px; }
   .note    { font-size:${fontBase-2}px; font-weight:500; color:#555; padding:2px 0; }
   .total   { font-size:${fontBase+2}px; font-weight:700; padding:4px 0; border-top:1px solid #000; margin-top:3px; }
-  @media print { @page { margin:0; size:80mm 2000mm; } body { padding:3mm; } }
+  @media print { @page { margin:0; } body { padding:3mm; } }
 </style></head><body>
   <div class="store">${stored.store_name || 'Mi Tienda'}</div>
   ${stored.store_address ? `<div class="sub">${stored.store_address}</div>` : ''}
