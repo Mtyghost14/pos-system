@@ -5,6 +5,11 @@ import { registerIpcHandlers } from './ipc-handlers'
 import { setupBackup } from './backup'
 import { autoUpdater } from 'electron-updater'
 
+// Force GDI print path so older thermal printer drivers (e.g. Star TSP100)
+// can process the job. Chromium 112+ defaults to a PDF compositor pipeline
+// that GDI-only drivers receive as a blank page.
+app.commandLine.appendSwitch('disable-features', 'UsePdfCompositorServiceForPrint')
+
 let mainWindow: BrowserWindow | null = null
 
 function createWindow() {
