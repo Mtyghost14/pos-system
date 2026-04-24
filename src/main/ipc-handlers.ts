@@ -1090,9 +1090,9 @@ export function registerIpcHandlers() {
           const printOpts: any = { silent: !!printerName, printBackground: true, margins: { marginType: 'none' } }
           if (printerName) printOpts.deviceName = printerName
           win.webContents.print(printOpts, (success, reason) => {
+            done(success ? { success: true } : { success: false, message: reason || 'Impresión falló' })
             win.destroy()
             try { unlinkSync(htmlFile) } catch {}
-            done(success ? { success: true } : { success: false, message: reason || 'Impresión falló' })
           })
         }, 1500)
       }

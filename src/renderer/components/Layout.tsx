@@ -15,24 +15,27 @@ function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) =
   const totalRef     = useRef<HTMLSpanElement | null>(null)
   const btnTotalRef  = useRef<HTMLSpanElement | null>(null)
 
-  const computeTotal = () =>
-    [...BILLS, ...COINS].reduce((sum, d) => {
-      const qty = parseInt(inputRefs.current[String(d)]?.value || '0') || 0
-      return sum + qty * d
-    }, 0)
+  const computeTotal = () => {
+    let sum = 0
+    for (const d of BILLS) sum += (parseInt(inputRefs.current[`bill_${d}`]?.value || '0') || 0) * d
+    for (const d of COINS) sum += (parseInt(inputRefs.current[`coin_${d}`]?.value || '0') || 0) * d
+    return sum
+  }
 
   const recalc = () => {
     let total = 0
-    for (const d of [...BILLS, ...COINS]) {
-      const qty = parseInt(inputRefs.current[String(d)]?.value || '0') || 0
+    const process = (d: number, key: string) => {
+      const qty = parseInt(inputRefs.current[key]?.value || '0') || 0
       const sub = qty * d
       total += sub
-      const el = subRefs.current[String(d)]
+      const el = subRefs.current[key]
       if (el) {
         el.textContent = sub > 0 ? fmtCash(sub) : '—'
         el.style.color = sub > 0 ? 'var(--nm-text)' : 'var(--nm-text-light)'
       }
     }
+    for (const d of BILLS) process(d, `bill_${d}`)
+    for (const d of COINS) process(d, `coin_${d}`)
     if (totalRef.current)    totalRef.current.textContent    = fmtCash(total)
     if (btnTotalRef.current) btnTotalRef.current.textContent = fmtCash(total)
   }
@@ -44,15 +47,13 @@ function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) =
     recalc()
   }
 
-  const allDenoms = [...BILLS, ...COINS]
-
-  const makeRow = (d: number, bg: string, label: string) => (
-    <div key={d} style={{ display: 'grid', gridTemplateColumns: '70px 1fr 80px', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+  const makeRow = (d: number, key: string, bg: string, label: string) => (
+    <div key={key} style={{ display: 'grid', gridTemplateColumns: '70px 1fr 80px', alignItems: 'center', gap: 8, marginBottom: 6 }}>
       <div style={{ background: bg, color: '#fff', fontWeight: 900, fontSize: 13, borderRadius: 8, padding: '4px 0', textAlign: 'center' }}>{label}</div>
       <input
         type="text"
         inputMode="numeric"
-        ref={el => { inputRefs.current[String(d)] = el }}
+        ref={el => { inputRefs.current[key] = el }}
         defaultValue=""
         onInput={handleInput}
         placeholder="0"
@@ -60,7 +61,7 @@ function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) =
         style={{ padding: '6px 10px', fontSize: 14, fontWeight: 800, textAlign: 'center', width: '100%' }}
       />
       <span
-        ref={el => { subRefs.current[String(d)] = el }}
+        ref={el => { subRefs.current[key] = el }}
         style={{ textAlign: 'right', fontSize: 13, fontWeight: 700, color: 'var(--nm-text-light)' }}
       >—</span>
     </div>
@@ -72,10 +73,10 @@ function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) =
         <div style={{ fontSize: 16, fontWeight: 900, color: 'var(--nm-text)', marginBottom: 16, textAlign: 'center' }}>🪙 Contar Efectivo</div>
 
         <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--nm-accent)', marginBottom: 6 }}>Billetes</div>
-        {BILLS.map(d => makeRow(d, 'linear-gradient(145deg,#6b9cf0,#4d7ee8)', `$${d}`))}
+        {BILLS.map(d => makeRow(d, `bill_${d}`, 'linear-gradient(145deg,#6b9cf0,#4d7ee8)', `$${d}`))}
 
         <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--nm-text-muted)', margin: '10px 0 6px' }}>Monedas</div>
-        {COINS.map(d => makeRow(d, 'linear-gradient(145deg,#c8cdd5,#adb4be)', d < 1 ? `${d * 100}¢` : `$${d}`))}
+        {COINS.map(d => makeRow(d, `coin_${d}`, 'linear-gradient(145deg,#c8cdd5,#adb4be)', d < 1 ? `${d * 100}¢` : `$${d}`))}
 
         <div style={{ background: 'var(--nm-bg)', borderRadius: 14, padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '14px 0', boxShadow: 'var(--nm-inset)' }}>
           <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--nm-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Total</span>
