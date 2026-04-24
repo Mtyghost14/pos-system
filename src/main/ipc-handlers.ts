@@ -1181,17 +1181,21 @@ export function registerIpcHandlers() {
     const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
     const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
     const mergedData = { ...stored, ...data }
-    const html = buildShiftHTML(mergedData)
     const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
-    return printHtmlFile(html, printerName, { width: 320, height: 900 })
+    if (process.platform === 'win32' && printerName) {
+      return printRawBytes(printerName, buildShiftESCPOS(mergedData))
+    }
+    return printHtmlFile(buildShiftHTML(mergedData), printerName, { width: 320, height: 900 })
   })
 
   ipcMain.handle('printer:printDailyCorte', async (_, dailyData: any) => {
     const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
     const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
     const printerName = (stored.printer_port || '').trim()
-    const html = buildDailyCorteHTML(dailyData, stored)
-    return printHtmlFile(html, printerName, { width: 320, height: 900 })
+    if (process.platform === 'win32' && printerName) {
+      return printRawBytes(printerName, buildDailyCorteESCPOS(dailyData, stored))
+    }
+    return printHtmlFile(buildDailyCorteHTML(dailyData, stored), printerName, { width: 320, height: 900 })
   })
 
   // ─── EXCEL ──────────────────────────────────────────────────────────────────
@@ -1473,7 +1477,7 @@ function buildReceiptESCPOS(data: any): Buffer {
   line(data.footer || data.receipt_footer || 'Gracias por su compra!')
 
   raw(ESC, 0x64, 4)             // feed 4 lines
-  raw(GS, 0x56, 0x42, 0x00)    // partial cut
+  raw(GS, 0x56, 0x00)          // full cut
 
   return Buffer.concat(parts)
 }
@@ -1606,6 +1610,187 @@ function buildReceiptPrintData(data: any): any[] {
   lines.push({ type: 'text', value: ' ', style: {} })
 
   return lines
+}
+
+function buildShiftESCPOS(data: any): Buffer {
+  const fmt  = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  const norm = (s: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?')
+  const COLS = 42
+  const ESC = 0x1b, GS = 0x1d, LF = 0x0a
+
+  const parts: Buffer[] = []
+  const raw  = (...b: number[]) => parts.push(Buffer.from(b))
+  const line = (s: string) => { parts.push(Buffer.from(norm(s).substring(0, COLS), 'ascii')); raw(LF) }
+  const cline = (s: string) => {
+    const n = norm(s).substring(0, COLS)
+    const pad = Math.floor((COLS - n.length) / 2)
+    parts.push(Buffer.from(' '.repeat(Math.max(0, pad)) + n, 'ascii')); raw(LF)
+  }
+  const two = (l: string, r: string) => {
+    const right = norm(r); const left = norm(l).substring(0, COLS - right.length - 1)
+    parts.push(Buffer.from(left + ' '.repeat(Math.max(1, COLS - left.length - right.length)) + right, 'ascii')); raw(LF)
+  }
+  const div     = () => line('-'.repeat(COLS))
+  const section = (t: string) => { raw(LF, ESC, 0x45, 0x01); cline(`== ${norm(t)} ==`); raw(ESC, 0x45, 0x00) }
+  const total   = (l: string, v: string) => { raw(ESC, 0x45, 0x01); two(l, `= ${v}`); raw(ESC, 0x45, 0x00) }
+
+  raw(ESC, 0x40)
+
+  // Header
+  raw(ESC, 0x61, 0x01, ESC, 0x45, 0x01, ESC, 0x21, 0x10)
+  line(data.storeName || data.store_name || 'Mi Tienda')
+  raw(ESC, 0x21, 0x00, ESC, 0x45, 0x00)
+  raw(ESC, 0x61, 0x01)
+  if (data.storePhone   || data.store_phone)   line(data.storePhone || data.store_phone)
+  if (data.storeSocial  || data.store_social)  line(data.storeSocial || data.store_social)
+  if (data.storeAddress || data.store_address) line(data.storeAddress || data.store_address)
+
+  raw(ESC, 0x61, 0x00)
+  div()
+  raw(ESC, 0x61, 0x01, ESC, 0x45, 0x01); line('CORTE DE TURNO'); raw(ESC, 0x45, 0x00, ESC, 0x61, 0x00)
+  line(`TURNO #${data.shiftId || ''}`)
+  line(`Realizado: ${data.endedAt || ''}`)
+  line(`Cajero: ${norm(data.cashierName || '')}`)
+  div()
+  two('Ventas Totales:', fmt(data.sales?.total))
+  line(`N Ventas en el turno: ${data.sales?.count || 0}`)
+
+  section('DINERO EN CAJA')
+  two('Fondo de Caja:', fmt(data.openingCash || 0))
+  two('Ventas Efectivo:', `+${fmt(data.sales?.efectivo || 0)}`)
+  two('Entradas:', `+${fmt(data.entradas || 0)}`)
+  two('Salidas:', `-${fmt(data.salidas || 0)}`)
+  total('Efectivo en Caja:', fmt(data.expectedCash || 0))
+
+  const entradas   = (data.movementDetails || []).filter((m: any) => m.type === 'entrada')
+  const salidasLst = (data.movementDetails || []).filter((m: any) => m.type === 'salida')
+
+  section('ENTRADAS EFECTIVO')
+  if (entradas.length === 0) line('Sin entradas')
+  else entradas.forEach((m: any) => two(norm(m.concept || 'Entrada'), fmt(m.amount)))
+  total('Total Entradas:', fmt(data.entradas || 0))
+
+  section('SALIDAS EFECTIVO')
+  if (salidasLst.length === 0) line('Sin salidas')
+  else salidasLst.forEach((m: any) => two(norm(m.concept || 'Retiro'), fmt(m.amount)))
+  total('Total Salidas:', fmt(data.salidas || 0))
+
+  section('VENTAS')
+  two('En Efectivo:', fmt(data.sales?.efectivo || 0))
+  two('Con Tarjeta:', fmt(data.sales?.tarjeta || 0))
+  two('Transferencia:', fmt(data.sales?.transferencia || 0))
+  if ((data.sales?.mixto || 0) > 0) two('Mixto:', fmt(data.sales?.mixto))
+  total('Total Ventas:', fmt(data.sales?.total || 0))
+
+  section('VENTAS POR DEPTO')
+  if (!(data.salesByCategory || []).length) line('Sin datos')
+  else (data.salesByCategory || []).forEach((c: any) => two(norm(c.category || 'Sin cat.'), fmt(c.total)))
+
+  section('GANANCIA POR DEPTO')
+  if (!(data.salesByCategory || []).length) line('Sin datos')
+  else (data.salesByCategory || []).forEach((c: any) => two(norm(c.category || 'Sin cat.'), fmt((c.total || 0) - (c.cost || 0))))
+  total('Utilidad Total:', fmt(data.utility || 0))
+
+  section('RESUMEN CAJA')
+  two('Efectivo Esperado:', fmt(data.expectedCash || 0))
+  if (data.countedCash !== undefined) {
+    two('Contado:', fmt(data.countedCash))
+    raw(ESC, 0x45, 0x01)
+    two('Diferencia:', fmt((data.countedCash || 0) - (data.expectedCash || 0)))
+    raw(ESC, 0x45, 0x00)
+  }
+
+  raw(LF); div()
+  raw(ESC, 0x61, 0x01); line(data.endedAt || new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
+  raw(ESC, 0x64, 4, GS, 0x56, 0x00)  // feed + full cut
+  return Buffer.concat(parts)
+}
+
+function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
+  const fmt  = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  const norm = (s: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?')
+  const COLS = 42
+  const ESC = 0x1b, GS = 0x1d, LF = 0x0a
+
+  const parts: Buffer[] = []
+  const raw  = (...b: number[]) => parts.push(Buffer.from(b))
+  const line = (s: string) => { parts.push(Buffer.from(norm(s).substring(0, COLS), 'ascii')); raw(LF) }
+  const cline = (s: string) => {
+    const n = norm(s).substring(0, COLS)
+    const pad = Math.floor((COLS - n.length) / 2)
+    parts.push(Buffer.from(' '.repeat(Math.max(0, pad)) + n, 'ascii')); raw(LF)
+  }
+  const two = (l: string, r: string) => {
+    const right = norm(r); const left = norm(l).substring(0, COLS - right.length - 1)
+    parts.push(Buffer.from(left + ' '.repeat(Math.max(1, COLS - left.length - right.length)) + right, 'ascii')); raw(LF)
+  }
+  const div     = () => line('-'.repeat(COLS))
+  const section = (t: string) => { raw(LF, ESC, 0x45, 0x01); cline(`== ${norm(t)} ==`); raw(ESC, 0x45, 0x00) }
+  const total   = (l: string, v: string) => { raw(ESC, 0x45, 0x01); two(l, `= ${v}`); raw(ESC, 0x45, 0x00) }
+
+  raw(ESC, 0x40)
+
+  // Header
+  raw(ESC, 0x61, 0x01, ESC, 0x45, 0x01, ESC, 0x21, 0x10)
+  line(stored.store_name || 'Mi Tienda')
+  raw(ESC, 0x21, 0x00, ESC, 0x45, 0x00)
+  raw(ESC, 0x61, 0x01)
+  if (stored.store_phone)   line(stored.store_phone)
+  if (stored.store_social)  line(stored.store_social)
+  if (stored.store_address) line(stored.store_address)
+
+  raw(ESC, 0x61, 0x00)
+  div()
+  raw(ESC, 0x61, 0x01, ESC, 0x45, 0x01); line('CORTE DEL DIA'); raw(ESC, 0x45, 0x00, ESC, 0x61, 0x00)
+  line(data.date || new Date().toLocaleDateString('es-MX'))
+  div()
+  two('Turnos trabajados:', String(data.shiftsCount || 0))
+  two('Transacciones:', String(data.sales?.count || 0))
+
+  section('VENTAS')
+  two('En Efectivo:', fmt(data.sales?.efectivo || 0))
+  two('Con Tarjeta:', fmt(data.sales?.tarjeta || 0))
+  two('Transferencia:', fmt(data.sales?.transferencia || 0))
+  if ((data.sales?.mixto || 0) > 0) two('Mixto:', fmt(data.sales?.mixto))
+  total('Total Ventas:', fmt(data.sales?.total || 0))
+
+  section('POR CAJERO')
+  if (!(data.byCashier || []).length) line('Sin datos')
+  else (data.byCashier || []).forEach((c: any) => two(norm(c.cashier || ''), `${c.count} vtas · ${fmt(c.total)}`))
+
+  section('VENTAS POR DEPTO')
+  if (!(data.byCategory || []).length) line('Sin datos')
+  else (data.byCategory || []).forEach((c: any) => two(norm(c.category || 'Sin cat.'), fmt(c.total)))
+
+  section('GANANCIA POR DEPTO')
+  if (!(data.byCategory || []).length) line('Sin datos')
+  else (data.byCategory || []).forEach((c: any) => two(norm(c.category || 'Sin cat.'), fmt((c.total || 0) - (c.cost || 0))))
+  total('Utilidad Total:', fmt(data.utility || 0))
+
+  const entradas   = (data.movementDetails || []).filter((m: any) => m.type === 'entrada')
+  const salidasLst = (data.movementDetails || []).filter((m: any) => m.type === 'salida')
+
+  section('ENTRADAS EFECTIVO')
+  if (entradas.length === 0) line('Sin entradas')
+  else entradas.forEach((m: any) => two(norm(m.concept || 'Entrada'), fmt(m.amount)))
+  total('Total Entradas:', fmt(data.entradas || 0))
+
+  section('SALIDAS EFECTIVO')
+  if (salidasLst.length === 0) line('Sin salidas')
+  else salidasLst.forEach((m: any) => two(norm(m.concept || 'Retiro'), fmt(m.amount)))
+  total('Total Salidas:', fmt(data.salidas || 0))
+
+  section('RESUMEN CAJA')
+  two('Ef. inicial (todos turnos):', fmt(data.openingCash || 0))
+  two('Ventas efectivo:', fmt(data.sales?.efectivo || 0))
+  two('+ Entradas:', fmt(data.entradas || 0))
+  two('- Salidas:', fmt(data.salidas || 0))
+  total('Esperado en Caja:', fmt(data.expectedCash || 0))
+
+  raw(LF); div()
+  raw(ESC, 0x61, 0x01); line(new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
+  raw(ESC, 0x64, 4, GS, 0x56, 0x00)  // feed + full cut
+  return Buffer.concat(parts)
 }
 
 function buildShiftHTML(data: any): string {
