@@ -1192,8 +1192,8 @@ function buildZPL(items: LabelItem[], size: LabelSize, settings: LabelSettings =
   const nameLines = 2
 
   // Compute proportional element heights
-  let nameFontH  = Math.round(hDots * 0.18 * fontMult)
-  let barcodeH   = settings.showBarcode ? Math.round(hDots * 0.38) : 0
+  let nameFontH  = Math.round(hDots * 0.14 * fontMult)
+  let barcodeH   = settings.showBarcode ? Math.round(hDots * 0.32) : 0
   let codeFontH  = Math.round(hDots * 0.10 * fontMult)
   let priceFontH = settings.showPrice   ? Math.round(hDots * 0.19 * fontMult) : 0
 
@@ -1393,7 +1393,7 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
   useEffect(() => {
     if (!previewRef.current || !previewItem || !labelSettings.showBarcode) return
     const { hMm } = LABEL_SIZES[size]
-    const svgStr = generateBarcodeSVG(previewItem.code, Math.round(hMm * 1.5))
+    const svgStr = generateBarcodeSVG(previewItem.code, Math.round(hMm * 1.1))
     const el = previewRef.current.querySelector('.preview-barcode')
     if (el) el.innerHTML = svgStr
   }, [previewItem, size, labelSettings])
@@ -1564,7 +1564,7 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
               }}
             >
               {/* 1. Name — top */}
-              <div style={{ fontSize: 9, fontWeight: 900, textAlign: 'center', color: '#000', width: '100%', lineHeight: 1.2, overflow: 'hidden', maxHeight: '2.6em' }}>
+              <div style={{ fontSize: 7, fontWeight: 900, textAlign: 'center', color: '#000', width: '100%', lineHeight: 1.2, overflow: 'hidden', maxHeight: '2.6em' }}>
                 {previewItem.label.length > 40 ? previewItem.label.slice(0, 39) + '…' : previewItem.label}
               </div>
               {/* 2. Barcode — middle */}
