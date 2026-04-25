@@ -701,6 +701,7 @@ function CategoriesTab({ categories, reload, showMsg }: any) {
   const [newName, setNewName] = useState('')
   const [editing, setEditing] = useState<Category | null>(null)
   const [editName, setEditName] = useState('')
+  const [confirmCat, setConfirmCat] = useState<Category | null>(null)
 
   const handleAdd = async () => {
     if (!newName.trim()) return
@@ -715,15 +716,28 @@ function CategoriesTab({ categories, reload, showMsg }: any) {
     if (res.success) { showMsg('Categoría actualizada'); setEditing(null); reload() }
   }
 
-  const handleDelete = async (c: Category) => {
-    if (!confirm(`¿Eliminar categoría "${c.name}"?`)) return
-    const res = await window.api.deleteCategory(c.id)
+  const handleDelete = async () => {
+    if (!confirmCat) return
+    const res = await window.api.deleteCategory(confirmCat.id)
+    setConfirmCat(null)
     if (res.success) { showMsg('Categoría eliminada'); reload() }
     else showMsg(res.message, 'err')
   }
 
   return (
     <div className="max-w-md space-y-4">
+      {confirmCat && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div style={{ background: 'var(--nm-bg)', borderRadius: 16, padding: 28, maxWidth: 340, width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
+            <p style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>¿Eliminar categoría?</p>
+            <p style={{ fontSize: 13, color: 'var(--nm-text-muted)', marginBottom: 20 }}>Se eliminará <strong>{confirmCat.name}</strong>. Esta acción no se puede deshacer.</p>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button onClick={() => setConfirmCat(null)} className="nm-btn" style={{ padding: '8px 18px', fontSize: 13 }}>Cancelar</button>
+              <button onClick={handleDelete} style={{ padding: '8px 18px', fontSize: 13, fontWeight: 700, borderRadius: 10, background: '#ef4444', color: '#fff', border: 'none', cursor: 'pointer' }}>Eliminar</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div style={{ background: "var(--nm-bg)", borderRadius: 16, boxShadow: "var(--nm-raised)", padding: 16 }}>
         <h2 className="font-bold text-gray-900 mb-3">Nueva Categoría</h2>
         <div className="flex gap-2">
@@ -744,7 +758,7 @@ function CategoriesTab({ categories, reload, showMsg }: any) {
               <>
                 <span className="flex-1 font-medium">{c.name}</span>
                 <button onClick={() => { setEditing(c); setEditName(c.name) }} className="text-blue-500 text-sm mr-3 hover:text-blue-700">Editar</button>
-                <button onClick={() => handleDelete(c)} className="text-red-500 text-sm hover:text-red-700">Eliminar</button>
+                <button onClick={() => setConfirmCat(c)} className="text-red-500 text-sm hover:text-red-700">Eliminar</button>
               </>
             )}
           </div>
@@ -865,6 +879,7 @@ function SalesByPeriodTab() {
 function PromotionsTab({ products }: any) {
   const [promos, setPromos] = useState<Promotion[]>([])
   const [showAdd, setShowAdd] = useState(false)
+  const [confirmPromoId, setConfirmPromoId] = useState<number | null>(null)
   const [form, setForm] = useState({ name: '', product_id: '', discount_type: 'percentage', discount_value: '', start_date: new Date().toISOString().slice(0, 10), end_date: '', active: true })
   const set = (k: string, v: any) => setForm(f => ({ ...f, [k]: v }))
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
@@ -897,9 +912,10 @@ function PromotionsTab({ products }: any) {
     loadPromos()
   }
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('¿Eliminar esta promoción?')) return
-    await window.api.deletePromotion(id)
+  const handleDelete = async () => {
+    if (confirmPromoId === null) return
+    await window.api.deletePromotion(confirmPromoId)
+    setConfirmPromoId(null)
     loadPromos()
   }
 
@@ -907,6 +923,18 @@ function PromotionsTab({ products }: any) {
 
   return (
     <div className="space-y-4">
+      {confirmPromoId !== null && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div style={{ background: 'var(--nm-bg)', borderRadius: 16, padding: 28, maxWidth: 340, width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
+            <p style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>¿Eliminar promoción?</p>
+            <p style={{ fontSize: 13, color: 'var(--nm-text-muted)', marginBottom: 20 }}>Esta acción no se puede deshacer.</p>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button onClick={() => setConfirmPromoId(null)} className="nm-btn" style={{ padding: '8px 18px', fontSize: 13 }}>Cancelar</button>
+              <button onClick={handleDelete} style={{ padding: '8px 18px', fontSize: 13, fontWeight: 700, borderRadius: 10, background: '#ef4444', color: '#fff', border: 'none', cursor: 'pointer' }}>Eliminar</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex justify-between items-center">
         <h2 className="font-bold text-gray-900">Promociones</h2>
         <button onClick={() => setShowAdd(true)} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium">+ Nueva Promoción</button>
@@ -934,7 +962,7 @@ function PromotionsTab({ products }: any) {
                   </button>
                 </td>
                 <td className="px-3 py-2">
-                  <button onClick={() => handleDelete(p.id)} className="text-red-500 text-xs hover:text-red-700">Eliminar</button>
+                  <button onClick={() => setConfirmPromoId(p.id)} className="text-red-500 text-xs hover:text-red-700">Eliminar</button>
                 </td>
               </tr>
             ))}
