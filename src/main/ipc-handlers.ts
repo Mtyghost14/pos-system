@@ -971,6 +971,23 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('printer:getSystemPrinters', async () => {
+    if (process.platform === 'win32') {
+      // Use PowerShell to enumerate ALL installed printers including Zebra/raw-driver printers
+      // that Chromium's print service silently excludes.
+      return new Promise<{ name: string; isDefault: boolean }[]>(resolve => {
+        exec(
+          `powershell -NoProfile -Command "Get-Printer | Select-Object Name,Default | ConvertTo-Json -Compress"`,
+          (err, stdout) => {
+            if (err || !stdout.trim()) { resolve([]); return }
+            try {
+              const raw = JSON.parse(stdout.trim())
+              const list = Array.isArray(raw) ? raw : [raw]
+              resolve(list.map((p: any) => ({ name: String(p.Name), isDefault: p.Default === true })))
+            } catch { resolve([]) }
+          }
+        )
+      })
+    }
     try {
       const win = BrowserWindow.getAllWindows()[0]
       if (!win) return []
