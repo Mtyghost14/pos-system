@@ -1149,27 +1149,45 @@ function buildZPL(items: LabelItem[], size: LabelSize, settings: LabelSettings =
   const { wDots, hDots } = LABEL_SIZES[size]
   const fontMult = settings.fontSize === 'small' ? 0.8 : settings.fontSize === 'large' ? 1.25 : 1.0
 
-  // Proportional layout — stack only visible elements
-  let curY = 6
-
-  const nameFontH = Math.round(hDots * 0.18 * fontMult)
-  const nameFontW = Math.round(nameFontH * 0.7)
+  const topMargin = 6
   const nameLines = 2
-  const nameY     = curY
+
+  // Compute proportional element heights
+  let nameFontH  = Math.round(hDots * 0.18 * fontMult)
+  let barcodeH   = settings.showBarcode ? Math.round(hDots * 0.38) : 0
+  let codeFontH  = Math.round(hDots * 0.10 * fontMult)
+  let priceFontH = settings.showPrice   ? Math.round(hDots * 0.15 * fontMult) : 0
+
+  // Fixed gaps that don't scale: top + after-name + after-barcode + after-code
+  const fixedGaps = topMargin + 6 + (settings.showBarcode ? 2 : 0) + 6
+  const totalContent = nameFontH * nameLines + barcodeH + codeFontH + priceFontH
+
+  // Scale all elements down if they overflow the label height
+  if (totalContent + fixedGaps > hDots) {
+    const scale = (hDots - fixedGaps - 4) / totalContent
+    nameFontH  = Math.max(8,  Math.round(nameFontH  * scale))
+    barcodeH   = Math.max(20, Math.round(barcodeH   * scale))
+    codeFontH  = Math.max(6,  Math.round(codeFontH  * scale))
+    priceFontH = Math.max(8,  Math.round(priceFontH * scale))
+  }
+
+  let nameFontW  = Math.round(nameFontH  * 0.7)
+  let codeFontW  = Math.round(codeFontH  * 0.65)
+  let priceFontW = Math.round(priceFontH * 0.75)
+
+  // Stack Y positions after scaling
+  let curY = topMargin
+
+  const nameY  = curY
   curY += nameFontH * nameLines + 6
 
-  const barcodeY  = curY
-  const barcodeH  = settings.showBarcode ? Math.round(hDots * 0.38) : 0
+  const barcodeY = curY
   if (settings.showBarcode) curY += barcodeH + 2
 
-  const codeFontH = Math.round(hDots * 0.10 * fontMult)
-  const codeFontW = Math.round(codeFontH * 0.65)
-  const codeY     = curY
+  const codeY = curY
   curY += codeFontH + 6
 
-  const priceFontH = Math.round(hDots * 0.15 * fontMult)
-  const priceFontW = Math.round(priceFontH * 0.75)
-  const priceY    = curY
+  const priceY = curY
 
   return items.flatMap(item =>
     Array.from({ length: item.qty }, () => {
