@@ -1162,9 +1162,9 @@ function buildZPL(items: LabelItem[], size: LabelSize, settings: LabelSettings =
   const fixedGaps = topMargin + 6 + (settings.showBarcode ? 2 : 0) + 6
   const totalContent = nameFontH * nameLines + barcodeH + codeFontH + priceFontH
 
-  // Scale all elements down if they overflow the label height
-  if (totalContent + fixedGaps > hDots) {
-    const scale = (hDots - fixedGaps - 4) / totalContent
+  // Scale all elements down if they overflow the label height (12-dot bottom margin)
+  if (totalContent + fixedGaps > hDots - 12) {
+    const scale = (hDots - fixedGaps - 12) / totalContent
     nameFontH  = Math.max(8,  Math.round(nameFontH  * scale))
     barcodeH   = Math.max(20, Math.round(barcodeH   * scale))
     codeFontH  = Math.max(6,  Math.round(codeFontH  * scale))
@@ -1208,7 +1208,13 @@ function buildZPL(items: LabelItem[], size: LabelSize, settings: LabelSettings =
       ]
 
       if (settings.showBarcode) {
-        lines.push(`^FO12,${barcodeY}^BY2^BCN,${barcodeH},N,N,N^FD${item.code}^FS`)
+        // Center the barcode: estimate CODE128 width (11 modules/char + start/stop/check + quiet zones)
+        // and pick narrow-bar width so the barcode fills ~80% of the label width.
+        const codeModules = 11 * (item.code.length + 2) + 13 + 20
+        const byW = Math.max(2, Math.floor((wDots * 0.8) / codeModules))
+        const estW = codeModules * byW
+        const barcodeX = Math.max(10, Math.floor((wDots - estW) / 2))
+        lines.push(`^FO${barcodeX},${barcodeY}^BY${byW}^BCN,${barcodeH},N,N,N^FD${item.code}^FS`)
       }
       // Always show the code number (small text)
       lines.push(`^FO0,${codeY}^FB${wDots},1,,C^A0N,${codeFontH},${codeFontW}^FD${item.code}^FS`)
