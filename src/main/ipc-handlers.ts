@@ -1012,44 +1012,63 @@ export function registerIpcHandlers() {
       writeFileSync(tmpFile, zpl, 'utf8')
 
       if (process.platform === 'win32') {
-        // Windows: send raw ZPL directly to printer port — no C# compilation needed.
-        // Looks up the Windows printer by name → gets its port → writes bytes directly.
-        // Supports USB/LPT ports and TCP/IP network printers.
+        // Windows: send raw ZPL via the Windows Spooler API (winspool.drv).
+        // This works for ALL port types: USB (USB001), LPT, TCP/IP network printers.
+        // The old \\.\USBxxx file-open approach only works for LPT/COM — not USB.
         const psFile = join(tmpdir(), `zpl_print_${Date.now()}.ps1`)
         const safeWinName = winName.replace(/'/g, "''")
         const safeTmpFile = tmpFile.replace(/'/g, "''")
-        // Build the PS script as a regular string (not template) to keep backslash counts predictable.
-        // In PowerShell: single-quoted strings are 100% literal (only '' escapes a quote).
-        // Device path prefix for USB/LPT ports is \\.\  which is the 4-char sequence: \, \, ., \
         const psScript = [
           `$ErrorActionPreference = 'Stop'`,
           `$pName = '${safeWinName}'`,
           `$fPath = '${safeTmpFile}'`,
           `$bytes = [System.IO.File]::ReadAllBytes($fPath)`,
           ``,
-          `function Send-Bytes([byte[]]$data, [string]$port) {`,
-          `    if ($port -match '^IP_(.+)$') {`,
-          `        $ip = $Matches[1]`,
-          `        $tcp = New-Object System.Net.Sockets.TcpClient($ip, 9100)`,
-          `        $ns = $tcp.GetStream()`,
-          `        $ns.Write($data, 0, $data.Length)`,
-          `        $ns.Flush(); $tcp.Close(); return`,
-          `    }`,
-          `    if ($port -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$') {`,
-          `        $tcp = New-Object System.Net.Sockets.TcpClient($port, 9100)`,
-          `        $ns = $tcp.GetStream()`,
-          `        $ns.Write($data, 0, $data.Length)`,
-          `        $ns.Flush(); $tcp.Close(); return`,
-          `    }`,
-          `    # USB/LPT: write directly to \\.\PORT`,
-          `    $dev = '\\\\.' + '\\' + $port`,
-          `    $fs = [System.IO.File]::Open($dev, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)`,
-          `    $fs.Write($data, 0, $data.Length); $fs.Flush(); $fs.Close()`,
+          `Add-Type -TypeDefinition @"`,
+          `using System;`,
+          `using System.Runtime.InteropServices;`,
+          `[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]`,
+          `public struct DOCINFOA {`,
+          `    [MarshalAs(UnmanagedType.LPStr)] public string pDocName;`,
+          `    [MarshalAs(UnmanagedType.LPStr)] public string pOutputFile;`,
+          `    [MarshalAs(UnmanagedType.LPStr)] public string pDataType;`,
           `}`,
+          `public class WinSpool {`,
+          `    [DllImport("winspool.Drv", CharSet=CharSet.Ansi, SetLastError=true)]`,
+          `    public static extern bool OpenPrinter(string szPrinter, out IntPtr hPrinter, IntPtr pd);`,
+          `    [DllImport("winspool.Drv", SetLastError=true)]`,
+          `    public static extern bool ClosePrinter(IntPtr hPrinter);`,
+          `    [DllImport("winspool.Drv", CharSet=CharSet.Ansi, SetLastError=true)]`,
+          `    public static extern int StartDocPrinter(IntPtr hPrinter, int level, ref DOCINFOA di);`,
+          `    [DllImport("winspool.Drv", SetLastError=true)]`,
+          `    public static extern bool EndDocPrinter(IntPtr hPrinter);`,
+          `    [DllImport("winspool.Drv", SetLastError=true)]`,
+          `    public static extern bool StartPagePrinter(IntPtr hPrinter);`,
+          `    [DllImport("winspool.Drv", SetLastError=true)]`,
+          `    public static extern bool EndPagePrinter(IntPtr hPrinter);`,
+          `    [DllImport("winspool.Drv", SetLastError=true)]`,
+          `    public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, int dwCount, out int dwWritten);`,
+          `}`,
+          `"@ -Language CSharp`,
           ``,
-          `$printer = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq $pName } | Select-Object -First 1`,
-          `if ($printer) { Send-Bytes $bytes $printer.PortName; exit 0 }`,
-          `Send-Bytes $bytes $pName`,
+          `$hPrinter = [IntPtr]::Zero`,
+          `if (-not [WinSpool]::OpenPrinter($pName, [ref]$hPrinter, [IntPtr]::Zero)) {`,
+          `    throw "No se pudo abrir la impresora: $pName"`,
+          `}`,
+          `$di = New-Object DOCINFOA`,
+          `$di.pDocName = 'ZPL Label'`,
+          `$di.pOutputFile = $null`,
+          `$di.pDataType = 'RAW'`,
+          `[WinSpool]::StartDocPrinter($hPrinter, 1, [ref]$di) | Out-Null`,
+          `[WinSpool]::StartPagePrinter($hPrinter) | Out-Null`,
+          `$ptr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length)`,
+          `[System.Runtime.InteropServices.Marshal]::Copy($bytes, 0, $ptr, $bytes.Length)`,
+          `$written = 0`,
+          `[WinSpool]::WritePrinter($hPrinter, $ptr, $bytes.Length, [ref]$written) | Out-Null`,
+          `[System.Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)`,
+          `[WinSpool]::EndPagePrinter($hPrinter) | Out-Null`,
+          `[WinSpool]::EndDocPrinter($hPrinter) | Out-Null`,
+          `[WinSpool]::ClosePrinter($hPrinter) | Out-Null`,
           `exit 0`,
         ].join('\n')
         writeFileSync(psFile, psScript, 'utf8')
