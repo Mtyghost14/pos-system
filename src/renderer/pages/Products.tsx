@@ -702,6 +702,7 @@ function CategoriesTab({ categories, reload, showMsg }: any) {
   const [editing, setEditing] = useState<Category | null>(null)
   const [editName, setEditName] = useState('')
   const [confirmCat, setConfirmCat] = useState<Category | null>(null)
+  const [deleteError, setDeleteError] = useState('')
 
   const handleAdd = async () => {
     if (!newName.trim()) return
@@ -719,9 +720,14 @@ function CategoriesTab({ categories, reload, showMsg }: any) {
   const handleDelete = async () => {
     if (!confirmCat) return
     const res = await window.api.deleteCategory(confirmCat.id)
-    setConfirmCat(null)
-    if (res.success) { showMsg('Categoría eliminada'); reload() }
-    else showMsg(res.message, 'err')
+    if (res.success) {
+      setConfirmCat(null)
+      setDeleteError('')
+      showMsg('Categoría eliminada')
+      reload()
+    } else {
+      setDeleteError(res.message || 'No se pudo eliminar')
+    }
   }
 
   return (
@@ -730,10 +736,15 @@ function CategoriesTab({ categories, reload, showMsg }: any) {
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
           <div style={{ background: 'var(--nm-bg)', borderRadius: 16, padding: 28, maxWidth: 340, width: '90%', boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
             <p style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>¿Eliminar categoría?</p>
-            <p style={{ fontSize: 13, color: 'var(--nm-text-muted)', marginBottom: 20 }}>Se eliminará <strong>{confirmCat.name}</strong>. Esta acción no se puede deshacer.</p>
+            <p style={{ fontSize: 13, color: 'var(--nm-text-muted)', marginBottom: deleteError ? 12 : 20 }}>Se eliminará <strong>{confirmCat.name}</strong>. Esta acción no se puede deshacer.</p>
+            {deleteError && (
+              <p style={{ fontSize: 13, fontWeight: 700, color: '#ef4444', marginBottom: 16, padding: '8px 12px', background: 'rgba(239,68,68,0.08)', borderRadius: 8 }}>
+                ⚠️ {deleteError}
+              </p>
+            )}
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button onClick={() => setConfirmCat(null)} className="nm-btn" style={{ padding: '8px 18px', fontSize: 13 }}>Cancelar</button>
-              <button onClick={handleDelete} style={{ padding: '8px 18px', fontSize: 13, fontWeight: 700, borderRadius: 10, background: '#ef4444', color: '#fff', border: 'none', cursor: 'pointer' }}>Eliminar</button>
+              <button onClick={() => { setConfirmCat(null); setDeleteError('') }} className="nm-btn" style={{ padding: '8px 18px', fontSize: 13 }}>Cancelar</button>
+              {!deleteError && <button onClick={handleDelete} style={{ padding: '8px 18px', fontSize: 13, fontWeight: 700, borderRadius: 10, background: '#ef4444', color: '#fff', border: 'none', cursor: 'pointer' }}>Eliminar</button>}
             </div>
           </div>
         </div>
@@ -1184,7 +1195,7 @@ function buildZPL(items: LabelItem[], size: LabelSize, settings: LabelSettings =
   let nameFontH  = Math.round(hDots * 0.18 * fontMult)
   let barcodeH   = settings.showBarcode ? Math.round(hDots * 0.38) : 0
   let codeFontH  = Math.round(hDots * 0.10 * fontMult)
-  let priceFontH = settings.showPrice   ? Math.round(hDots * 0.15 * fontMult) : 0
+  let priceFontH = settings.showPrice   ? Math.round(hDots * 0.19 * fontMult) : 0
 
   // Fixed gaps that don't scale: top + after-name + after-barcode + after-code
   const fixedGaps = topMargin + 6 + (settings.showBarcode ? 2 : 0) + 6
@@ -1568,7 +1579,7 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
               </div>
               {/* 4. Price */}
               {labelSettings.showPrice && (
-                <div style={{ fontSize: 10, fontWeight: 900, textAlign: 'center', color: '#000' }}>
+                <div style={{ fontSize: 13, fontWeight: 900, textAlign: 'center', color: '#000' }}>
                   ${(previewItem.product.price || 0).toFixed(2)}
                 </div>
               )}
