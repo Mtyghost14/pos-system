@@ -80,10 +80,17 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('categories:delete', (_, id: number) => {
-    const used = db.prepare('SELECT id FROM products WHERE category_id = ? AND active = 1 LIMIT 1').get(id)
-    if (used) return { success: false, message: 'La categoría tiene productos activos' }
-    db.prepare('DELETE FROM categories WHERE id = ?').run(id)
-    return { success: true }
+    try {
+      const used = db.prepare('SELECT id FROM products WHERE category_id = ? AND active = 1 LIMIT 1').get(id)
+      if (used) return { success: false, message: 'La categoría tiene productos activos' }
+      // Inactive (soft-deleted) products still reference this category — clear them first
+      // so the foreign key constraint doesn't block the delete
+      db.prepare('UPDATE products SET category_id = NULL WHERE category_id = ?').run(id)
+      db.prepare('DELETE FROM categories WHERE id = ?').run(id)
+      return { success: true }
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'Error al eliminar' }
+    }
   })
 
   // ─── PRODUCTS ───────────────────────────────────────────────────────────────

@@ -719,14 +719,18 @@ function CategoriesTab({ categories, reload, showMsg }: any) {
 
   const handleDelete = async () => {
     if (!confirmCat) return
-    const res = await window.api.deleteCategory(confirmCat.id)
-    if (res.success) {
-      setConfirmCat(null)
-      setDeleteError('')
-      showMsg('Categoría eliminada')
-      reload()
-    } else {
-      setDeleteError(res.message || 'No se pudo eliminar')
+    try {
+      const res = await window.api.deleteCategory(confirmCat.id)
+      if (res.success) {
+        setConfirmCat(null)
+        setDeleteError('')
+        showMsg('Categoría eliminada')
+        reload()
+      } else {
+        setDeleteError(res.message || 'No se pudo eliminar')
+      }
+    } catch {
+      setDeleteError('Error al eliminar la categoría')
     }
   }
 
