@@ -67,7 +67,7 @@ export default function Products() {
     >
       {tab === 'catalogo' && <CatalogTab products={products} categories={categories} loadProducts={loadProducts} loading={loading} />}
       {tab === 'agregar' && <AddProductTab categories={categories} reload={loadProducts} showMsg={showMsg} userId={user?.id} />}
-      {tab === 'modificar' && <ModifyProductTab categories={categories} showMsg={showMsg} />}
+      {tab === 'modificar' && <ModifyProductTab categories={categories} showMsg={showMsg} reload={loadProducts} />}
       {tab === 'eliminar' && <DeleteProductTab showMsg={showMsg} reload={loadProducts} />}
       {tab === 'categorias' && <CategoriesTab categories={categories} reload={loadCategories} showMsg={showMsg} />}
       {tab === 'ventas' && <SalesByPeriodTab />}
@@ -250,7 +250,7 @@ function AddProductTab({ categories, reload, showMsg, userId }: any) {
 // ─── MODIFY PRODUCT TAB ──────────────────────────────────────────────────────
 type PendingBarcode = { code: string; label: string; _key: number }
 
-function ModifyProductTab({ categories, showMsg }: any) {
+function ModifyProductTab({ categories, showMsg, reload }: any) {
   const [search, setSearch] = useState('')
   const [results, setResults] = useState<Product[]>([])
   const [selected, setSelected] = useState<Product | null>(null)
@@ -327,6 +327,7 @@ function ModifyProductTab({ categories, showMsg }: any) {
     if (res.success) {
       showMsg('Producto actualizado')
       setSelected(null); setBarcodes([]); setPending([]); setResults([])
+      reload()
       setTimeout(() => searchRef.current?.focus(), 50)
     } else showMsg(res.message || 'Error al actualizar', 'err')
   }
