@@ -1251,12 +1251,13 @@ function buildZPL(items: LabelItem[], size: LabelSize, settings: LabelSettings =
       ]
 
       if (settings.showBarcode) {
-        // Center the barcode: estimate CODE128 width (11 modules/char + start/stop/check + quiet zones)
-        // and pick narrow-bar width so the barcode fills ~80% of the label width.
+        // Center the barcode. Fill target 60% leaves room for the printer's
+        // own quiet zones (which are added on top of our estimate and caused
+        // the barcode to overflow the left edge when byW was too large).
         const codeModules = 11 * (item.code.length + 2) + 13 + 20
-        const byW = Math.max(2, Math.floor((wDots * 0.8) / codeModules))
+        const byW = Math.max(2, Math.floor((wDots * 0.60) / codeModules))
         const estW = codeModules * byW
-        const barcodeX = Math.max(10, Math.floor((wDots - estW) / 2))
+        const barcodeX = Math.max(20, Math.floor((wDots - estW) / 2))
         lines.push(`^FO${barcodeX},${barcodeY}^BY${byW}^BCN,${barcodeH},N,N,N^FD${item.code}^FS`)
       }
       // Always show the code number (small text)
