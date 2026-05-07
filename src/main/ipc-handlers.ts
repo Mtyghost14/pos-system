@@ -872,7 +872,8 @@ export function registerIpcHandlers() {
     `).all() as any[]
 
     const shifts = db.prepare(`
-      SELECT COUNT(*) as count, COALESCE(SUM(opening_cash),0) as opening_cash
+      SELECT COUNT(*) as count,
+        COALESCE((SELECT opening_cash FROM shifts WHERE DATE(started_at,'localtime') = DATE('now','localtime') ORDER BY started_at ASC LIMIT 1), 0) as opening_cash
       FROM shifts
       WHERE DATE(started_at,'localtime') = DATE('now','localtime')
     `).get() as any
@@ -1824,7 +1825,7 @@ function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
   total('Total Salidas:', fmt(data.salidas || 0))
 
   section('RESUMEN CAJA')
-  two('Ef. inicial (todos turnos):', fmt(data.openingCash || 0))
+  two('Ef. inicial (primer turno):', fmt(data.openingCash || 0))
   two('Ventas efectivo:', fmt(data.sales?.efectivo || 0))
   two('+ Entradas:', fmt(data.entradas || 0))
   two('- Salidas:', fmt(data.salidas || 0))
@@ -2069,7 +2070,7 @@ function buildDailyCorteHTML(data: any, stored: any): string {
   ${total('TOTAL SALIDAS', fmt(data.salidas || 0))}
 
   ${section('RESUMEN CAJA')}
-  ${row('Ef. inicial (todos los turnos):', fmt(data.openingCash || 0))}
+  ${row('Ef. inicial (primer turno):', fmt(data.openingCash || 0))}
   ${row('Ventas efectivo:', fmt(data.sales?.efectivo))}
   ${row('+ Entradas:', fmt(data.entradas || 0))}
   ${row('- Salidas:', fmt(data.salidas || 0))}
