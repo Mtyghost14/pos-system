@@ -10,6 +10,16 @@ export function getDb(): Database.Database {
   return db
 }
 
+// Flush the WAL into the main pos.db file so a plain file copy is complete.
+export function checkpointDb() {
+  try { db.pragma('wal_checkpoint(TRUNCATE)') } catch { /* ignore */ }
+}
+
+// Close the connection cleanly (used before restoring a backup over pos.db).
+export function closeDb() {
+  try { db.close() } catch { /* ignore */ }
+}
+
 export function initDatabase() {
   const userDataPath = app.getPath('userData')
   const dbPath = join(userDataPath, 'pos.db')

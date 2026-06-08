@@ -6,3 +6,6 @@ release/
 *.db-shm
 *.db-wal
 .env
+
+# TypeScript incremental build info
+*.tsbuildinfo

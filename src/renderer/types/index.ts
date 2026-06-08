@@ -168,4 +168,5 @@ export interface CartItem {
   discount: number
   promo_name?: string
   stock?: number
+  price_overridden?: boolean
 }

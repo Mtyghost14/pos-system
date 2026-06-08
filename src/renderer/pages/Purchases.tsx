@@ -108,6 +108,7 @@ function SuppliersTab({ showMsg }: any) {
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<Supplier | null>(null)
   const [viewSupplier, setViewSupplier] = useState<Supplier | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Supplier | null>(null)
   const emptyForm = { name: '', contact_name: '', phone: '', email: '', address: '', products_supplied: '', notes: '' }
   const [form, setForm] = useState(emptyForm)
   const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
@@ -126,10 +127,10 @@ function SuppliersTab({ showMsg }: any) {
     setShowAdd(false); setEditing(null); setForm(emptyForm); load()
   }
 
-  const handleDelete = async (s: Supplier) => {
-    if (!confirm(`¿Eliminar proveedor "${s.name}"?`)) return
-    await window.api.deleteSupplier(s.id)
-    showMsg('Proveedor eliminado'); load()
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    await window.api.deleteSupplier(deleteTarget.id)
+    showMsg('Proveedor eliminado'); setDeleteTarget(null); load()
   }
 
   const openEdit = (s: Supplier) => {
@@ -187,7 +188,7 @@ function SuppliersTab({ showMsg }: any) {
             <div className="flex gap-2 flex-shrink-0">
               <button onClick={() => setViewSupplier(s)} className="text-blue-500 text-sm hover:text-blue-700">Ver</button>
               <button onClick={() => openEdit(s)} className="text-blue-500 text-sm hover:text-blue-700">Editar</button>
-              <button onClick={() => handleDelete(s)} className="text-red-500 text-sm hover:text-red-700">Eliminar</button>
+              <button onClick={() => setDeleteTarget(s)} className="text-red-500 text-sm hover:text-red-700">Eliminar</button>
             </div>
           </div>
         ))}
@@ -211,6 +212,18 @@ function SuppliersTab({ showMsg }: any) {
             {viewSupplier.address && <div><span className="font-medium">Dirección:</span> {viewSupplier.address}</div>}
             {viewSupplier.products_supplied && <div><span className="font-medium">Productos:</span> {viewSupplier.products_supplied}</div>}
             {viewSupplier.notes && <div><span className="font-medium">Notas:</span> {viewSupplier.notes}</div>}
+          </div>
+        </Modal>
+      )}
+
+      {deleteTarget && (
+        <Modal title="Eliminar Proveedor" onClose={() => setDeleteTarget(null)} size="sm">
+          <div className="space-y-4">
+            <p className="text-sm text-gray-700">¿Eliminar proveedor "{deleteTarget.name}"?</p>
+            <div className="flex gap-3 pt-2">
+              <button onClick={() => setDeleteTarget(null)} className="flex-1 border rounded-lg py-2 text-sm text-gray-600">Cancelar</button>
+              <button onClick={confirmDelete} className="flex-1 bg-red-600 text-white font-bold py-2 rounded-lg text-sm">Eliminar</button>
+            </div>
           </div>
         </Modal>
       )}

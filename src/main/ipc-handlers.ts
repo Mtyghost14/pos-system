@@ -1,5 +1,5 @@
 import { ipcMain, dialog, app, BrowserWindow } from 'electron'
-import { getDb } from './database'
+import { getDb, checkpointDb, closeDb } from './database'
 import bcrypt from 'bcryptjs'
 import { join } from 'path'
 import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'fs'
@@ -231,7 +231,7 @@ export function registerIpcHandlers() {
       VALUES (?,?,?,?,?,?,?)
       ON CONFLICT(code) DO UPDATE SET
         name=excluded.name, cost=excluded.cost, price=excluded.price, min_stock=excluded.min_stock,
-        updated_at=datetime('now','localtime')
+        active=1, updated_at=datetime('now','localtime')
     `)
     let imported = 0, updated = 0
     for (const row of rows) {
@@ -281,7 +281,12 @@ export function registerIpcHandlers() {
     const shift = db.prepare('SELECT * FROM shifts WHERE id = ?').get(shiftId) as any
     if (!shift) return 0
     const cashSales = (db.prepare(`
-      SELECT COALESCE(SUM(total),0) as total FROM sales WHERE shift_id=? AND payment_type='efectivo'
+      SELECT COALESCE(SUM(total),0) as total FROM sales WHERE shift_id=? AND payment_type='efectivo' AND cancelled=0
+    `).get(shiftId) as any).total
+    // Efectivo portion of mixto sales — stored as JSON in payment_details
+    const mixtoCash = (db.prepare(`
+      SELECT COALESCE(SUM(json_extract(payment_details,'$.efectivo')),0) as total
+      FROM sales WHERE shift_id=? AND payment_type='mixto' AND cancelled=0
     `).get(shiftId) as any).total
     const entradas = (db.prepare(`
       SELECT COALESCE(SUM(amount),0) as total FROM cash_movements WHERE shift_id=? AND type='entrada'
@@ -289,10 +294,8 @@ export function registerIpcHandlers() {
     const salidas = (db.prepare(`
       SELECT COALESCE(SUM(amount),0) as total FROM cash_movements WHERE shift_id=? AND type='salida'
     `).get(shiftId) as any).total
-    const devoluciones = (db.prepare(`
-      SELECT COALESCE(SUM(amount),0) as total FROM cash_movements WHERE shift_id=? AND type='devolucion'
-    `).get(shiftId) as any).total
-    return shift.opening_cash + cashSales + entradas - salidas - devoluciones
+    // Cancelled sales are already excluded above, so no separate devolucion term is needed.
+    return shift.opening_cash + cashSales + mixtoCash + entradas - salidas
   })
 
   function getShiftSummaryData(shiftId: number) {
@@ -308,8 +311,9 @@ export function registerIpcHandlers() {
         COALESCE(SUM(cost_total),0) as cost_total,
         COALESCE(SUM(CASE WHEN payment_type='efectivo' THEN total ELSE 0 END),0) as efectivo,
         COALESCE(SUM(CASE WHEN payment_type='tarjeta' THEN total ELSE 0 END),0) as tarjeta,
-        COALESCE(SUM(CASE WHEN payment_type='transferencia' THEN total ELSE 0 END),0) as transferencia
-      FROM sales WHERE shift_id = ?
+        COALESCE(SUM(CASE WHEN payment_type='transferencia' THEN total ELSE 0 END),0) as transferencia,
+        COALESCE(SUM(CASE WHEN payment_type='mixto' THEN total ELSE 0 END),0) as mixto
+      FROM sales WHERE shift_id = ? AND cancelled = 0
     `).get(shiftId) as any
 
     const movements = db.prepare(`
@@ -322,7 +326,14 @@ export function registerIpcHandlers() {
     const salidas = movements.find(m => m.type === 'salida')?.total || 0
     const devoluciones = movements.find(m => m.type === 'devolucion')?.total || 0
 
-    const expected_cash = (shift?.opening_cash || 0) + sales.efectivo + entradas - salidas - devoluciones
+    // Efectivo portion of mixto sales (non-cancelled) — must count toward cash in drawer
+    const mixtoCash = (db.prepare(`
+      SELECT COALESCE(SUM(json_extract(payment_details,'$.efectivo')),0) as total
+      FROM sales WHERE shift_id=? AND payment_type='mixto' AND cancelled=0
+    `).get(shiftId) as any).total
+
+    // Cancelled sales are excluded from sales.efectivo/mixtoCash, so no devolucion term is needed.
+    const expected_cash = (shift?.opening_cash || 0) + sales.efectivo + mixtoCash + entradas - salidas
 
     const salesByCategory = db.prepare(`
       SELECT
@@ -342,7 +353,7 @@ export function registerIpcHandlers() {
     `).all(shiftId) as any[]
 
     return {
-      shift, sales, entradas, salidas, devoluciones, expected_cash, salesByCategory,
+      shift, sales, entradas, salidas, devoluciones, mixtoCash, expected_cash, salesByCategory,
       movementDetails,
       utility: sales.total - sales.cost_total,
     }
@@ -455,7 +466,10 @@ export function registerIpcHandlers() {
     if (filters?.shift_id) { query += ' AND s.shift_id = ?'; params.push(filters.shift_id) }
     if (filters?.cashier_id) { query += ' AND s.cashier_id = ?'; params.push(filters.cashier_id) }
     query += ' ORDER BY s.timestamp DESC'
-    if (filters?.limit) { query += ` LIMIT ${filters.limit}` }
+    if (filters?.limit) {
+      const lim = Math.max(0, Math.floor(Number(filters.limit)) || 0)
+      if (lim > 0) { query += ' LIMIT ?'; params.push(lim) }
+    }
 
     const sales = db.prepare(query).all(...params) as any[]
 
@@ -889,10 +903,16 @@ export function registerIpcHandlers() {
     const entradas = cashMovements.filter((m: any) => m.type === 'entrada').reduce((s: number, m: any) => s + (m.amount || 0), 0)
     const salidas  = cashMovements.filter((m: any) => m.type === 'salida').reduce((s: number, m: any) => s + (m.amount || 0), 0)
 
+    // Efectivo portion of mixto sales (non-cancelled) for today — must count toward cash in drawer
+    const mixtoCash = (db.prepare(`
+      SELECT COALESCE(SUM(json_extract(payment_details,'$.efectivo')),0) as total
+      FROM sales WHERE DATE(timestamp,'localtime') = DATE('now','localtime') AND payment_type='mixto' AND cancelled=0
+    `).get() as any).total
+
     const salesTotal = sales?.total || 0
     const costTotal  = sales?.cost_total || 0
     const openingCash = shifts?.opening_cash || 0
-    const expectedCash = openingCash + (sales?.efectivo || 0) + entradas - salidas
+    const expectedCash = openingCash + (sales?.efectivo || 0) + mixtoCash + entradas - salidas
 
     return {
       sales,
@@ -902,6 +922,7 @@ export function registerIpcHandlers() {
       shiftsCount: shifts?.count || 0,
       entradas,
       salidas,
+      mixtoCash,
       openingCash,
       expectedCash,
       utility: salesTotal - costTotal,
@@ -1343,6 +1364,8 @@ export function registerIpcHandlers() {
       const { mkdirSync, copyFileSync, existsSync } = require('fs')
       if (!existsSync(backupsDir)) mkdirSync(backupsDir, { recursive: true })
       const srcPath = join(userDataPath, 'pos.db')
+      // Flush the WAL into pos.db so the copied file includes the latest data
+      checkpointDb()
       const now = new Date()
       const name = `pos_backup_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}.db`
       const destPath = join(backupsDir, name)
@@ -1370,16 +1393,33 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('backup:restore', async (_e, filename: string) => {
     try {
-      const { copyFileSync, existsSync } = require('fs')
+      const { copyFileSync, existsSync, rmSync } = require('fs')
       const userDataPath = app.getPath('userData')
       const backupPath = join(userDataPath, 'backups', filename)
       const dbPath = join(userDataPath, 'pos.db')
       if (!existsSync(backupPath)) return { success: false, message: 'Archivo no encontrado' }
-      // Create safety backup before restoring
+
+      // Flush WAL into pos.db so the safety backup is complete
+      checkpointDb()
+
+      // Create safety backup of the current DB before restoring
       const now = new Date()
       const safetyName = `pre_restore_${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}.db`
       copyFileSync(dbPath, join(userDataPath, 'backups', safetyName))
+
+      // Close the live connection before overwriting the file, and remove the
+      // stale WAL/SHM sidecar files so they don't shadow the restored data.
+      closeDb()
+      for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+        try { if (existsSync(sidecar)) rmSync(sidecar) } catch { /* ignore */ }
+      }
+
       copyFileSync(backupPath, dbPath)
+
+      // Relaunch so the app reopens against the restored database with a fresh
+      // connection (all IPC handlers captured the original db reference).
+      app.relaunch()
+      app.exit(0)
       return { success: true }
     } catch (err: any) {
       return { success: false, message: err.message }
@@ -1701,7 +1741,7 @@ function buildShiftESCPOS(data: any): Buffer {
 
   section('DINERO EN CAJA')
   two('Fondo de Caja:', fmt(data.openingCash || 0))
-  two('Ventas Efectivo:', `+${fmt(data.sales?.efectivo || 0)}`)
+  two('Ventas Efectivo:', `+${fmt((data.sales?.efectivo || 0) + (data.mixtoCash || 0))}`)
   two('Entradas:', `+${fmt(data.entradas || 0)}`)
   two('Salidas:', `-${fmt(data.salidas || 0)}`)
   total('Efectivo en Caja:', fmt(data.expectedCash || 0))
@@ -1826,7 +1866,7 @@ function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
 
   section('RESUMEN CAJA')
   two('Ef. inicial (primer turno):', fmt(data.openingCash || 0))
-  two('Ventas efectivo:', fmt(data.sales?.efectivo || 0))
+  two('Ventas efectivo:', fmt((data.sales?.efectivo || 0) + (data.mixtoCash || 0)))
   two('+ Entradas:', fmt(data.entradas || 0))
   two('- Salidas:', fmt(data.salidas || 0))
   total('Esperado en Caja:', fmt(data.expectedCash || 0))
@@ -1945,7 +1985,7 @@ function buildShiftHTML(data: any): string {
 
   ${section('RESUMEN CAJA')}
   ${row('Inicial:', fmt(data.openingCash || 0))}
-  ${row('Ventas efectivo:', fmt(data.sales?.efectivo))}
+  ${row('Ventas efectivo:', fmt((data.sales?.efectivo || 0) + (data.mixtoCash || 0)))}
   ${row('+ Entradas:', fmt(data.entradas || 0))}
   ${row('- Salidas:', fmt(data.salidas || 0))}
   ${total('ESPERADO EN CAJA', fmt(data.expectedCash || 0))}
@@ -2071,7 +2111,7 @@ function buildDailyCorteHTML(data: any, stored: any): string {
 
   ${section('RESUMEN CAJA')}
   ${row('Ef. inicial (primer turno):', fmt(data.openingCash || 0))}
-  ${row('Ventas efectivo:', fmt(data.sales?.efectivo))}
+  ${row('Ventas efectivo:', fmt((data.sales?.efectivo || 0) + (data.mixtoCash || 0)))}
   ${row('+ Entradas:', fmt(data.entradas || 0))}
   ${row('- Salidas:', fmt(data.salidas || 0))}
   ${total('ESPERADO EN CAJA', fmt(data.expectedCash || 0))}

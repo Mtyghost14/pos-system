@@ -223,6 +223,7 @@ export default function Corte() {
     movementDetails:  summary?.movementDetails || [],
     entradas:         summary?.entradas || 0,
     salidas:          summary?.salidas || 0,
+    mixtoCash:        summary?.mixtoCash || 0,
     utility:          summary?.utility || 0,
     openingCash:      shift?.opening_cash || 0,
     expectedCash:     cashBalance,
@@ -335,10 +336,9 @@ export default function Corte() {
           <div style={{ height: 2, boxShadow: '0 1px 0 var(--nm-shadow-light), 0 -1px 0 var(--nm-shadow-dark)', borderRadius: 1, marginBottom: 4 }} />
 
           <Row label="Efectivo inicial" value={fmt(shift.opening_cash)} />
-          <Row label="Ventas en efectivo" value={fmt(summary?.sales?.efectivo || 0)} />
+          <Row label="Ventas en efectivo" value={fmt((summary?.sales?.efectivo || 0) + (summary?.mixtoCash || 0))} />
           <Row label="Entradas de efectivo" value={fmt(summary?.entradas || 0)} color="var(--nm-accent)" />
           <Row label="Retiros de efectivo" value={`-${fmt(summary?.salidas || 0)}`} color="var(--nm-danger)" />
-          {(summary?.devoluciones || 0) > 0 && <Row label="Devoluciones" value={`-${fmt(summary?.devoluciones || 0)}`} color="var(--nm-danger)" />}
           <div style={{ height: 2, boxShadow: '0 1px 0 var(--nm-shadow-light), 0 -1px 0 var(--nm-shadow-dark)', borderRadius: 1 }} />
           <Row label="Efectivo esperado en caja" value={fmt(cashBalance)} bold />
 

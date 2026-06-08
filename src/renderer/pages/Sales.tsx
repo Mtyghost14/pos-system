@@ -22,6 +22,8 @@ export default function Sales() {
   const [cashBalance, setCashBalance] = useState(0)
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [editingQty, setEditingQty] = useState('')
+  const [editingPriceIndex, setEditingPriceIndex] = useState<number | null>(null)
+  const [editingPrice, setEditingPrice] = useState('')
   const [showPayModal, setShowPayModal] = useState(false)
   const [showMovModal, setShowMovModal] = useState<'entrada' | 'salida' | null>(null)
   const [movAmount, setMovAmount] = useState('')
@@ -184,6 +186,20 @@ export default function Sales() {
     }
     setEditingIndex(null)
     setEditingQty('')
+  }
+
+  const saveEditPrice = (idx: number) => {
+    const price = parseFloat(editingPrice)
+    if (!isNaN(price) && price >= 0) {
+      setCart(prev => {
+        const u = [...prev]
+        const changed = price !== u[idx].unit_price
+        u[idx] = { ...u[idx], unit_price: price, price_overridden: changed || u[idx].price_overridden }
+        return u
+      })
+    }
+    setEditingPriceIndex(null)
+    setEditingPrice('')
   }
 
   const subtotal = cart.reduce((s, i) => s + i.unit_price * i.quantity, 0)
@@ -601,8 +617,32 @@ export default function Sales() {
                       </span>
                     )}
                   </div>
-                  <div style={{ textAlign: 'right', fontSize: 13, color: 'var(--nm-text-muted)', fontWeight: 600 }}>
-                    {fmt(item.unit_price)}
+                  <div style={{ textAlign: 'right' }}>
+                    {editingPriceIndex === idx ? (
+                      <input
+                        autoFocus
+                        type="number"
+                        value={editingPrice}
+                        onChange={e => setEditingPrice(e.target.value)}
+                        onBlur={() => saveEditPrice(idx)}
+                        onKeyDown={e => { if (e.key === 'Enter') saveEditPrice(idx) }}
+                        className="nm-input"
+                        style={{ width: 80, textAlign: 'right', padding: '4px 6px', fontSize: 13 }}
+                        step="0.01"
+                        min="0"
+                      />
+                    ) : (
+                      <span
+                        onClick={() => { setEditingPriceIndex(idx); setEditingPrice(String(item.unit_price)) }}
+                        style={{ cursor: 'pointer', fontSize: 13, color: 'var(--nm-text-muted)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}
+                        title="Editar precio (solo esta venta)"
+                      >
+                        {item.price_overridden && (
+                          <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--nm-accent)' }} title="Precio editado">✎</span>
+                        )}
+                        {fmt(item.unit_price)}
+                      </span>
+                    )}
                   </div>
                   <div style={{ textAlign: 'right', fontSize: 14, fontWeight: 800, color: 'var(--nm-text)' }}>
                     {fmt(item.unit_price * item.quantity)}
@@ -633,7 +673,7 @@ export default function Sales() {
               fontWeight: 600,
               color: 'var(--nm-text-muted)',
             }}>
-              {cart.length} artículo(s) · Click en cantidad para editar
+              {cart.length} artículo(s) · Click en cantidad o precio para editar
             </div>
           </div>
         </div>
