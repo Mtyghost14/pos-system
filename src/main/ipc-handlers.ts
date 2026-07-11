@@ -1786,7 +1786,7 @@ function buildShiftESCPOS(data: any): Buffer {
 
   raw(LF); div()
   raw(ESC, 0x61, 0x01); line(data.endedAt || new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
-  raw(ESC, 0x64, 4, GS, 0x56, 0x00)  // feed + full cut
+  raw(ESC, 0x64, 8, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
   return Buffer.concat(parts)
 }
 
@@ -1873,7 +1873,7 @@ function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
 
   raw(LF); div()
   raw(ESC, 0x61, 0x01); line(new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
-  raw(ESC, 0x64, 4, GS, 0x56, 0x00)  // feed + full cut
+  raw(ESC, 0x64, 8, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
   return Buffer.concat(parts)
 }
 
@@ -1995,6 +1995,7 @@ function buildShiftHTML(data: any): string {
   ` : ''}
   <div class="divider"></div>
   <div class="note">${data.endedAt || new Date().toLocaleString('es-MX')}</div>
+  <div style="height:18mm"></div>
 </body>
 </html>`
 }
@@ -2118,5 +2119,6 @@ function buildDailyCorteHTML(data: any, stored: any): string {
 
   <div class="divider"></div>
   <div class="note">${new Date().toLocaleString('es-MX')}</div>
+  <div style="height:18mm"></div>
 </body></html>`
 }
