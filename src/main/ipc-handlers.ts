@@ -1786,7 +1786,7 @@ function buildShiftESCPOS(data: any): Buffer {
 
   raw(LF); div()
   raw(ESC, 0x61, 0x01); line(data.endedAt || new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
-  raw(ESC, 0x64, 8, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
+  raw(ESC, 0x64, 14, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
   return Buffer.concat(parts)
 }
 
@@ -1873,7 +1873,7 @@ function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
 
   raw(LF); div()
   raw(ESC, 0x61, 0x01); line(new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
-  raw(ESC, 0x64, 8, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
+  raw(ESC, 0x64, 14, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
   return Buffer.concat(parts)
 }
 
@@ -1943,7 +1943,7 @@ function buildShiftHTML(data: any): string {
   .total   { font-size: ${fontBase + 2}px; font-weight: 700; padding: 4px 0; border-top: 1px solid #000; margin-top: 3px; }
   @media print {
     @page { margin: 0; }
-    body  { padding: 3mm; }
+    body  { padding: 3mm 3mm 40mm; }
   }
 </style>
 </head>
@@ -1995,7 +1995,7 @@ function buildShiftHTML(data: any): string {
   ` : ''}
   <div class="divider"></div>
   <div class="note">${data.endedAt || new Date().toLocaleString('es-MX')}</div>
-  <div style="height:18mm"></div>
+  <div style="height:40mm"></div>
 </body>
 </html>`
 }
@@ -2073,7 +2073,7 @@ function buildDailyCorteHTML(data: any, stored: any): string {
   .row.bold{ font-weight:700; font-size:${fontBase+1}px; }
   .note    { font-size:${fontBase-2}px; font-weight:500; color:#555; padding:2px 0; }
   .total   { font-size:${fontBase+2}px; font-weight:700; padding:4px 0; border-top:1px solid #000; margin-top:3px; }
-  @media print { @page { margin:0; } body { padding:3mm; } }
+  @media print { @page { margin:0; } body { padding:3mm 3mm 40mm; } }
 </style></head><body>
   <div class="store">${stored.store_name || 'Mi Tienda'}</div>
   ${stored.store_address ? `<div class="sub">${stored.store_address}</div>` : ''}
@@ -2119,6 +2119,6 @@ function buildDailyCorteHTML(data: any, stored: any): string {
 
   <div class="divider"></div>
   <div class="note">${new Date().toLocaleString('es-MX')}</div>
-  <div style="height:18mm"></div>
+  <div style="height:40mm"></div>
 </body></html>`
 }
