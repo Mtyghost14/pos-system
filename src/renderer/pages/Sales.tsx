@@ -40,6 +40,7 @@ export default function Sales() {
   const [showDailySales, setShowDailySales] = useState(false)
   const [dailySales, setDailySales] = useState<any[]>([])
   const codeRef = useRef<HTMLInputElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (shift) {
@@ -70,6 +71,7 @@ export default function Sales() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'F1') { e.preventDefault(); codeRef.current?.focus() }
       if (e.key === 'F2') { e.preventDefault(); handleNewSale() }
+      if (e.key === 'F10') { e.preventDefault(); searchRef.current?.focus() }
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
@@ -230,7 +232,9 @@ export default function Sales() {
   const toggleMethod = (k: keyof typeof paymentEnabled) => {
     if (!mixedMode) {
       setPaymentEnabled({ efectivo: k === 'efectivo', tarjeta: k === 'tarjeta', transferencia: k === 'transferencia' })
-      setPayments({ efectivo: '', tarjeta: '', transferencia: '' })
+      // Card/transfer never give change, so prefill the exact sale total.
+      const exact = (k === 'tarjeta' || k === 'transferencia') && total > 0 ? total.toFixed(2) : ''
+      setPayments({ efectivo: '', tarjeta: k === 'tarjeta' ? exact : '', transferencia: k === 'transferencia' ? exact : '' })
     } else {
       setPaymentEnabled(p => ({ ...p, [k]: !p[k] }))
       if (paymentEnabled[k]) setPayment(k, '')
@@ -483,7 +487,7 @@ export default function Sales() {
             </div>
             {/* Text search */}
             <div style={{ flex: 1 }}>
-              <SearchInput onSelect={addToCart} placeholder="Buscar por nombre..." />
+              <SearchInput onSelect={addToCart} inputRef={searchRef} placeholder="Buscar por nombre... (F10)" />
             </div>
             {/* +1 btn */}
             <button
