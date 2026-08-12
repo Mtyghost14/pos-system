@@ -283,9 +283,9 @@ export function registerIpcHandlers() {
     const cashSales = (db.prepare(`
       SELECT COALESCE(SUM(total),0) as total FROM sales WHERE shift_id=? AND payment_type='efectivo' AND cancelled=0
     `).get(shiftId) as any).total
-    // Efectivo portion of mixto sales — stored as JSON in payment_details
+    // Efectivo neto de ventas mixtas (recibido en JSON menos el cambio entregado en efectivo)
     const mixtoCash = (db.prepare(`
-      SELECT COALESCE(SUM(json_extract(payment_details,'$.efectivo')),0) as total
+      SELECT COALESCE(SUM(COALESCE(json_extract(payment_details,'$.efectivo'),0) - COALESCE(change_amount,0)),0) as total
       FROM sales WHERE shift_id=? AND payment_type='mixto' AND cancelled=0
     `).get(shiftId) as any).total
     const entradas = (db.prepare(`
@@ -328,7 +328,7 @@ export function registerIpcHandlers() {
 
     // Efectivo portion of mixto sales (non-cancelled) — must count toward cash in drawer
     const mixtoCash = (db.prepare(`
-      SELECT COALESCE(SUM(json_extract(payment_details,'$.efectivo')),0) as total
+      SELECT COALESCE(SUM(COALESCE(json_extract(payment_details,'$.efectivo'),0) - COALESCE(change_amount,0)),0) as total
       FROM sales WHERE shift_id=? AND payment_type='mixto' AND cancelled=0
     `).get(shiftId) as any).total
 
@@ -524,7 +524,11 @@ export function registerIpcHandlers() {
       const cashAmount = (() => {
         if (sale.payment_type === 'efectivo') return sale.total
         if (sale.payment_type === 'mixto' && sale.payment_details) {
-          try { return JSON.parse(sale.payment_details).efectivo || 0 } catch { return 0 }
+          try {
+            const cashTendered = JSON.parse(sale.payment_details).efectivo || 0
+            // El cambio siempre se entrega en efectivo, así que el efectivo neto en caja es lo recibido menos el cambio
+            return Math.max(0, cashTendered - (sale.change_amount || 0))
+          } catch { return 0 }
         }
         return 0
       })()
@@ -905,7 +909,7 @@ export function registerIpcHandlers() {
 
     // Efectivo portion of mixto sales (non-cancelled) for today — must count toward cash in drawer
     const mixtoCash = (db.prepare(`
-      SELECT COALESCE(SUM(json_extract(payment_details,'$.efectivo')),0) as total
+      SELECT COALESCE(SUM(COALESCE(json_extract(payment_details,'$.efectivo'),0) - COALESCE(change_amount,0)),0) as total
       FROM sales WHERE DATE(timestamp,'localtime') = DATE('now','localtime') AND payment_type='mixto' AND cancelled=0
     `).get() as any).total
 
@@ -1251,6 +1255,17 @@ export function registerIpcHandlers() {
       return printRawBytes(printerName, buildShiftESCPOS(mergedData))
     }
     return printHtmlFile(buildShiftHTML(mergedData), printerName, { width: 320, height: 900 })
+  })
+
+  ipcMain.handle('printer:printShiftOpen', async (_, data: any) => {
+    const settingsRows = db.prepare('SELECT key, value FROM settings').all() as any[]
+    const stored = Object.fromEntries(settingsRows.map(r => [r.key, r.value]))
+    const mergedData = { ...stored, ...data }
+    const printerName = (mergedData.printerName || mergedData.printer_port || '').trim()
+    if (process.platform === 'win32' && printerName) {
+      return printRawBytes(printerName, buildShiftOpenESCPOS(mergedData))
+    }
+    return printHtmlFile(buildShiftOpenHTML(mergedData), printerName, { width: 320, height: 600 })
   })
 
   ipcMain.handle('printer:printDailyCorte', async (_, dailyData: any) => {
@@ -1790,6 +1805,64 @@ function buildShiftESCPOS(data: any): Buffer {
   return Buffer.concat(parts)
 }
 
+function buildShiftOpenESCPOS(data: any): Buffer {
+  const fmt  = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+  const norm = (s: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?')
+  const COLS = 42
+  const ESC = 0x1b, GS = 0x1d, LF = 0x0a
+
+  const parts: Buffer[] = []
+  const raw  = (...b: number[]) => parts.push(Buffer.from(b))
+  const line = (s: string) => { parts.push(Buffer.from(norm(s).substring(0, COLS), 'ascii')); raw(LF) }
+  const two = (l: string, r: string) => {
+    const right = norm(r); const left = norm(l).substring(0, COLS - right.length - 1)
+    parts.push(Buffer.from(left + ' '.repeat(Math.max(1, COLS - left.length - right.length)) + right, 'ascii')); raw(LF)
+  }
+  const div = () => line('-'.repeat(COLS))
+
+  raw(ESC, 0x40)
+
+  // Header
+  raw(ESC, 0x61, 0x01, ESC, 0x45, 0x01, ESC, 0x21, 0x10)
+  line(data.storeName || data.store_name || 'Mi Tienda')
+  raw(ESC, 0x21, 0x00, ESC, 0x45, 0x00)
+  raw(ESC, 0x61, 0x01)
+  if (data.storePhone   || data.store_phone)   line(data.storePhone || data.store_phone)
+  if (data.storeSocial  || data.store_social)  line(data.storeSocial || data.store_social)
+  if (data.storeAddress || data.store_address) line(data.storeAddress || data.store_address)
+
+  raw(ESC, 0x61, 0x00)
+  div()
+  raw(ESC, 0x61, 0x01, ESC, 0x45, 0x01, ESC, 0x21, 0x10); line('APERTURA DE TURNO'); raw(ESC, 0x21, 0x00, ESC, 0x45, 0x00, ESC, 0x61, 0x00)
+  div()
+  line(`Turno #${data.shiftId || ''}`)
+  line(`Cajero: ${norm(data.cashierName || '')}`)
+  line(`Apertura: ${data.startedAt || ''}`)
+  div()
+
+  // Fondo de caja (destacado)
+  raw(ESC, 0x45, 0x01, ESC, 0x21, 0x10)
+  two('FONDO INICIAL:', fmt(data.openingCash || 0))
+  raw(ESC, 0x21, 0x00, ESC, 0x45, 0x00)
+  div()
+
+  // Responsabilidad + firma
+  raw(LF)
+  line('El cajero recibe el fondo de caja')
+  line('indicado y se hace responsable del')
+  line('efectivo durante su turno.')
+  raw(LF, LF, LF, LF, LF)
+  raw(ESC, 0x61, 0x01)
+  line('____________________________')
+  line('Firma del cajero')
+  raw(ESC, 0x61, 0x00)
+
+  raw(LF); div()
+  raw(ESC, 0x61, 0x01); line(data.startedAt || new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
+  raw(ESC, 0x64, 14, GS, 0x56, 0x00)  // feed + full cut
+  return Buffer.concat(parts)
+}
+
 function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
   const fmt  = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
   const norm = (s: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?')
@@ -1995,6 +2068,70 @@ function buildShiftHTML(data: any): string {
   ` : ''}
   <div class="divider"></div>
   <div class="note">${data.endedAt || new Date().toLocaleString('es-MX')}</div>
+  <div style="height:40mm"></div>
+</body>
+</html>`
+}
+
+function buildShiftOpenHTML(data: any): string {
+  const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+
+  const sizeKey = data.receipt_font_size || 'medium'
+  const fontBase = sizeKey === 'small' ? 23 : sizeKey === 'large' ? 29 : 26
+
+  const row = (label: string, value: string) =>
+    `<div class="row">${label} ${value}</div>`
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: ${fontBase}px;
+    font-weight: 400;
+    line-height: 1.5;
+    text-align: center;
+    color: #000;
+    background: #fff;
+    width: 68mm;
+    margin: 0 auto;
+    padding: 4mm;
+  }
+  .store    { font-size: ${fontBase + 6}px; font-weight: 700; margin-bottom: 3px; }
+  .sub      { font-size: ${fontBase - 2}px; font-weight: 600; color: #333; }
+  .divider  { border-top: 1px solid #000; margin: 6px 0; }
+  .title    { font-size: ${fontBase + 6}px; font-weight: 700; margin: 5px 0; }
+  .row      { font-size: ${fontBase}px; font-weight: 500; padding: 2px 0; }
+  .fondo    { font-size: ${fontBase + 4}px; font-weight: 700; padding: 6px 0; border-top: 1px solid #000; border-bottom: 1px solid #000; margin: 6px 0; }
+  .note     { font-size: ${fontBase - 2}px; font-weight: 500; color: #333; padding: 2px 0; }
+  .sigline  { margin-top: 60px; border-top: 1px solid #000; width: 80%; margin-left: auto; margin-right: auto; }
+  .siglabel { font-size: ${fontBase - 2}px; font-weight: 600; padding-top: 3px; }
+  @media print {
+    @page { margin: 0; }
+    body  { padding: 3mm 3mm 40mm; }
+  }
+</style>
+</head>
+<body>
+  <div class="store">${data.storeName || 'Mi Tienda'}</div>
+  ${data.storeAddress ? `<div class="sub">${data.storeAddress}</div>` : ''}
+  ${data.storePhone   ? `<div class="sub">${data.storePhone}</div>` : ''}
+  ${data.storeSocial  ? `<div class="sub">${data.storeSocial}</div>` : ''}
+  <div class="divider"></div>
+  <div class="title">APERTURA DE TURNO</div>
+  <div class="divider"></div>
+  ${row('Turno #:', String(data.shiftId || ''))}
+  ${row('Cajero:', data.cashierName || '')}
+  ${row('Apertura:', data.startedAt || '')}
+  <div class="fondo">FONDO INICIAL: ${fmt(data.openingCash || 0)}</div>
+  <div class="note">El cajero recibe el fondo de caja indicado y se hace responsable del efectivo durante su turno.</div>
+  <div class="sigline"></div>
+  <div class="siglabel">Firma del cajero</div>
+  <div class="divider"></div>
+  <div class="note">${data.startedAt || new Date().toLocaleString('es-MX')}</div>
   <div style="height:40mm"></div>
 </body>
 </html>`

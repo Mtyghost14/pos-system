@@ -131,11 +131,21 @@ export default function Layout() {
   const handleOpenShift = async () => {
     if (!openingCash || !user) return
     setOpeningError('')
-    const res = await window.api.openShift({ cashier_id: user.id, opening_cash: parseFloat(openingCash) })
+    const opening = parseFloat(openingCash)
+    const res = await window.api.openShift({ cashier_id: user.id, opening_cash: opening })
     if (res.success) {
       const sh = await window.api.getActiveShift(user.id)
       setShift(sh)
       setOpeningCash('')
+      // Imprime ticket de apertura con el fondo inicial y renglón de firma para trazar responsabilidad
+      try {
+        await window.api.printShiftOpen({
+          shiftId: sh?.id,
+          cashierName: user.name,
+          openingCash: opening,
+          startedAt: sh?.started_at || new Date().toLocaleString('es-MX'),
+        })
+      } catch { /* la apertura no debe fallar si la impresora no responde */ }
     } else {
       setOpeningError('Error al abrir turno. Intente de nuevo.')
     }
