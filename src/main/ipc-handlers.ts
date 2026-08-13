@@ -592,7 +592,7 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('inventory:getReport', () => {
     return db.prepare(`
-      SELECT p.code, p.name, c.name as category_name, p.stock, p.cost, p.price,
+      SELECT p.code, p.name, p.category_id, c.name as category_name, p.stock, p.cost, p.price,
              (p.stock * p.cost) as total_value
       FROM products p LEFT JOIN categories c ON p.category_id = c.id
       WHERE p.active = 1 ORDER BY p.name

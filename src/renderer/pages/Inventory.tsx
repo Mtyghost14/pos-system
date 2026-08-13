@@ -267,16 +267,24 @@ function LowStockTab() {
 
 function InventoryReport() {
   const [rows, setRows] = useState<any[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
+  const [categoryId, setCategoryId] = useState('')
 
   useEffect(() => {
     window.api.getInventoryReport().then(setRows)
+    window.api.getCategories().then(setCategories)
   }, [])
 
-  const totals = rows.reduce((s, r) => ({ value: s.value + r.total_value, units: s.units + r.stock }), { value: 0, units: 0 })
+  const filteredRows = categoryId
+    ? rows.filter(r => String(r.category_id) === categoryId)
+    : rows
+
+  const totals = filteredRows.reduce((s, r) => ({ value: s.value + r.total_value, units: s.units + r.stock }), { value: 0, units: 0 })
 
   const handleExport = async () => {
+    const catName = categoryId ? categories.find(c => String(c.id) === categoryId)?.name : null
     await window.api.exportToExcel({
-      filename: 'inventario.xlsx',
+      filename: catName ? `inventario-${catName}.xlsx` : 'inventario.xlsx',
       sheetName: 'Inventario',
       columns: [
         { header: 'Código', key: 'code', width: 20 },
@@ -287,19 +295,32 @@ function InventoryReport() {
         { header: 'Precio', key: 'price', width: 12 },
         { header: 'Valor Total', key: 'total_value', width: 14 },
       ],
-      rows: rows.map(r => [r.code, r.name, r.category_name, r.stock, r.cost, r.price, r.total_value]),
+      rows: filteredRows.map(r => [r.code, r.name, r.category_name, r.stock, r.cost, r.price, r.total_value]),
     })
   }
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <label className="text-sm font-medium text-gray-600">Categoría:</label>
+        <select
+          value={categoryId}
+          onChange={e => setCategoryId(e.target.value)}
+          className="border rounded-lg px-3 py-2 text-sm focus:outline-none"
+        >
+          <option value="">Todas las categorías</option>
+          {categories.map(c => (
+            <option key={c.id} value={String(c.id)}>{c.name}</option>
+          ))}
+        </select>
+      </div>
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
           <div className="text-2xl font-bold text-blue-800">{fmt(totals.value)}</div>
           <div className="text-sm font-medium text-blue-600 mt-1">Valor total al costo</div>
         </div>
         <div className="bg-green-50 border border-green-200 rounded-xl p-4">
-          <div className="text-2xl font-bold text-green-800">{rows.length}</div>
+          <div className="text-2xl font-bold text-green-800">{filteredRows.length}</div>
           <div className="text-sm font-medium text-green-600 mt-1">SKUs activos</div>
         </div>
         <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
@@ -320,7 +341,7 @@ function InventoryReport() {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
-            {rows.map(r => (
+            {filteredRows.map(r => (
               <tr key={r.code} className="hover:bg-gray-50">
                 <td className="px-3 py-2 font-mono text-xs">{r.code}</td>
                 <td className="px-3 py-2 font-medium">{r.name}</td>
