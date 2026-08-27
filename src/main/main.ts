@@ -11,6 +11,9 @@ import { autoUpdater } from 'electron-updater'
 app.commandLine.appendSwitch('disable-features', 'UsePdfCompositorServiceForPrint')
 
 let mainWindow: BrowserWindow | null = null
+// Set to true right before an intentional quit (user allowed close, or an
+// update is being installed) so the `close` handler below doesn't block it.
+let forceClose = false
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -38,7 +41,6 @@ function createWindow() {
     mainWindow?.show()
   })
 
-  let forceClose = false
   mainWindow.on('close', (e) => {
     if (forceClose) return
     e.preventDefault()
@@ -69,34 +71,64 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 
-  // Auto-updater (only in packaged app, not during development)
+  // Auto-updater — listeners are always registered so the Configuración →
+  // Actualizaciones panel works; the automatic startup check only runs in the
+  // packaged app (electron-updater can't check from an unpacked dev build).
+  setupAutoUpdater()
   if (process.env.NODE_ENV !== 'development') {
-    autoUpdater.autoDownload = true
-    autoUpdater.autoInstallOnAppQuit = true
-
-    autoUpdater.on('update-available', (info) => {
-      mainWindow?.webContents.send('update:available', { version: info.version })
-    })
-
-    autoUpdater.on('download-progress', (progress) => {
-      mainWindow?.webContents.send('update:progress', { percent: Math.round(progress.percent) })
-    })
-
-    autoUpdater.on('update-downloaded', (info) => {
-      mainWindow?.webContents.send('update:ready', { version: info.version })
-    })
-
-    autoUpdater.on('error', (err) => {
-      console.error('AutoUpdater error:', err.message)
-    })
-
-    // Check on startup (after a short delay so the window is ready)
     setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000)
   }
 })
 
-// Renderer can trigger install when the user clicks "Reiniciar y actualizar"
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('update-available', (info) => {
+    mainWindow?.webContents.send('update:available', { version: info.version })
+  })
+
+  autoUpdater.on('update-not-available', (info) => {
+    mainWindow?.webContents.send('update:not-available', { version: info?.version })
+  })
+
+  autoUpdater.on('download-progress', (progress) => {
+    mainWindow?.webContents.send('update:progress', { percent: Math.round(progress.percent) })
+  })
+
+  autoUpdater.on('update-downloaded', (info) => {
+    mainWindow?.webContents.send('update:ready', { version: info.version })
+  })
+
+  autoUpdater.on('error', (err) => {
+    console.error('AutoUpdater error:', err?.message || err)
+    mainWindow?.webContents.send('update:error', { message: err?.message || 'Error desconocido al actualizar' })
+  })
+}
+
+// Current installed version, shown in the Actualizaciones panel.
+ipcMain.handle('app:getVersion', () => app.getVersion())
+
+// Manual "buscar actualizaciones" trigger. Resolves once the check completes;
+// the update-available / update-not-available / error events carry the detail.
+ipcMain.handle('update:check', async () => {
+  if (process.env.NODE_ENV === 'development') {
+    return { ok: false, message: 'Las actualizaciones solo funcionan en la aplicación instalada.' }
+  }
+  try {
+    const res = await autoUpdater.checkForUpdates()
+    const latest = res?.updateInfo?.version
+    const current = app.getVersion()
+    const updateAvailable = (res as any)?.isUpdateAvailable ?? (!!latest && latest !== current)
+    return { ok: true, updateAvailable, version: latest, current }
+  } catch (err: any) {
+    return { ok: false, message: err?.message || 'No se pudo verificar si hay actualizaciones' }
+  }
+})
+
+// Renderer can trigger install when the user clicks "Reiniciar e instalar"
 ipcMain.on('update:install', () => {
+  forceClose = true // let the window `close` handler through for the updater
   autoUpdater.quitAndInstall()
 })
 

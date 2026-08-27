@@ -5,7 +5,7 @@ import type { User } from '../types'
 import Modal from '../components/Modal'
 import PageShell from '../components/PageShell'
 
-type Tab = 'tienda' | 'impresora' | 'tickets' | 'facturacion' | 'usuarios' | 'respaldos'
+type Tab = 'tienda' | 'impresora' | 'tickets' | 'facturacion' | 'usuarios' | 'respaldos' | 'actualizaciones'
 
 export default function Settings() {
   const [tab, setTab] = useState<Tab>('tienda')
@@ -23,6 +23,7 @@ export default function Settings() {
     { id: 'facturacion', label: 'Facturación SAT' },
     { id: 'usuarios', label: 'Usuarios' },
     { id: 'respaldos', label: 'Respaldos' },
+    { id: 'actualizaciones', label: 'Actualizaciones' },
   ]
 
   return (
@@ -40,6 +41,7 @@ export default function Settings() {
       {tab === 'facturacion' && <InvoiceSettings showMsg={showMsg} />}
       {tab === 'usuarios' && <UsersSettings showMsg={showMsg} />}
       {tab === 'respaldos' && <BackupsTab showMsg={showMsg} />}
+      {tab === 'actualizaciones' && <UpdatesTab showMsg={showMsg} />}
     </PageShell>
   )
 }
@@ -968,6 +970,126 @@ function BackupsTab({ showMsg }: any) {
               <button onClick={() => handleRestore(confirmRestore)} className="nm-btn-danger" style={{ flex: 1, padding: '11px', fontSize: 13 }}>Restaurar</button>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type UpdatePhase = 'idle' | 'checking' | 'downloading' | 'ready' | 'uptodate' | 'error'
+
+function UpdatesTab({ showMsg }: any) {
+  const shift = useAuthStore(s => s.shift)
+  const [version, setVersion] = useState('')
+  const [latest, setLatest] = useState('')
+  const [phase, setPhase] = useState<UpdatePhase>('idle')
+  const [percent, setPercent] = useState(0)
+  const [errMsg, setErrMsg] = useState('')
+
+  useEffect(() => {
+    window.api.getAppVersion().then(setVersion).catch(() => {})
+
+    const offs = [
+      window.api.onUpdateAvailable((info: { version: string }) => { setLatest(info.version); setPercent(0); setPhase('downloading') }),
+      window.api.onUpdateNotAvailable(() => setPhase(p => (p === 'ready' || p === 'downloading') ? p : 'uptodate')),
+      window.api.onUpdateProgress((info: { percent: number }) => { setPercent(info.percent); setPhase(p => p === 'ready' ? p : 'downloading') }),
+      window.api.onUpdateReady((info: { version: string }) => { setLatest(info.version); setPhase('ready') }),
+      window.api.onUpdateError((info: { message: string }) => { setErrMsg(info.message); setPhase('error') }),
+    ]
+    return () => offs.forEach(off => { try { off?.() } catch {} })
+  }, [])
+
+  const handleCheck = async () => {
+    setErrMsg('')
+    setPhase('checking')
+    const res = await window.api.checkForUpdates()
+    if (!res.ok) {
+      setErrMsg(res.message || 'No se pudo verificar actualizaciones')
+      setPhase('error')
+      return
+    }
+    // Events normally drive the rest; this is an immediate fallback.
+    if (res.updateAvailable === false) {
+      setPhase(p => (p === 'ready' || p === 'downloading') ? p : 'uptodate')
+    } else if (res.updateAvailable && res.version) {
+      setLatest(res.version)
+    }
+  }
+
+  const busy = phase === 'checking' || phase === 'downloading'
+  const card: React.CSSProperties = { background: 'var(--nm-bg)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 20 }
+
+  return (
+    <div style={{ maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Info banner */}
+      <div style={{ background: 'var(--nm-bg)', borderRadius: 16, boxShadow: 'var(--nm-inset)', padding: '14px 18px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+        <span style={{ fontSize: 22 }}>⬇️</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--nm-text)', marginBottom: 4 }}>Actualiza sin salir del programa</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)', lineHeight: 1.5 }}>
+            Ya no necesitas entrar a ningún sitio web. Presiona <b>Buscar actualizaciones</b>; si hay una versión nueva se descarga sola y luego solo tienes que reiniciar. Tus datos no se tocan.
+          </div>
+        </div>
+      </div>
+
+      {/* Version + check */}
+      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 13, fontWeight: 900, color: 'var(--nm-text)' }}>Versión instalada</span>
+          <span style={{ fontSize: 15, fontWeight: 900, color: 'var(--nm-accent)' }}>v{version || '—'}</span>
+        </div>
+
+        <button
+          onClick={handleCheck}
+          disabled={busy}
+          className="nm-btn-accent"
+          style={{ padding: '12px', fontSize: 13, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, opacity: busy ? 0.6 : 1 }}
+        >
+          {phase === 'checking' ? '🔎 Buscando…'
+            : phase === 'downloading' ? `⬇️ Descargando… ${percent}%`
+            : '🔄 Buscar actualizaciones'}
+        </button>
+
+        {phase === 'downloading' && (
+          <div style={{ height: 8, borderRadius: 999, background: 'var(--nm-shadow-dark)', overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${percent}%`, background: 'var(--nm-accent)', transition: 'width .2s' }} />
+          </div>
+        )}
+
+        {phase === 'uptodate' && (
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--nm-success)', display: 'flex', alignItems: 'center', gap: 8 }}>
+            ✅ Ya tienes la última versión.
+          </div>
+        )}
+
+        {phase === 'error' && (
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--nm-danger)', lineHeight: 1.5 }}>
+            ⚠️ {errMsg}
+          </div>
+        )}
+      </div>
+
+      {/* Ready to install */}
+      {phase === 'ready' && (
+        <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 12, border: '2px solid var(--nm-success)' }}>
+          <div style={{ fontSize: 14, fontWeight: 900, color: 'var(--nm-text)' }}>
+            🎉 Actualización v{latest} lista para instalar
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)', lineHeight: 1.5 }}>
+            El programa se cerrará, se instalará la nueva versión y volverá a abrir. Toma unos segundos.
+          </div>
+          {shift && (
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--nm-warning)', lineHeight: 1.5 }}>
+              ⚠️ Tienes un turno abierto. Haz el corte antes de actualizar para no perder el conteo de caja.
+            </div>
+          )}
+          <button
+            onClick={() => window.api.installUpdate()}
+            className="nm-btn-accent"
+            style={{ padding: '13px', fontSize: 14, fontWeight: 900, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+          >
+            🔁 Reiniciar e instalar ahora
+          </button>
         </div>
       )}
     </div>

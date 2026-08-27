@@ -100,11 +100,32 @@ const api = {
   // App window
   onAppClosing: (cb: () => void) => ipcRenderer.on('app:closing', cb),
   allowClose: () => ipcRenderer.send('app:allow-close'),
+  getAppVersion: (): Promise<string> => ipcRenderer.invoke('app:getVersion'),
 
-  // Auto-updater
-  onUpdateAvailable: (cb: (info: { version: string }) => void) => ipcRenderer.on('update:available', (_, d) => cb(d)),
-  onUpdateProgress: (cb: (info: { percent: number }) => void) => ipcRenderer.on('update:progress', (_, d) => cb(d)),
-  onUpdateReady: (cb: (info: { version: string }) => void) => ipcRenderer.on('update:ready', (_, d) => cb(d)),
+  // Auto-updater. The on* helpers return an unsubscribe function so callers
+  // (e.g. the Configuración → Actualizaciones tab) can clean up on unmount.
+  checkForUpdates: (): Promise<{ ok: boolean; updateAvailable?: boolean; version?: string; current?: string; message?: string }> =>
+    ipcRenderer.invoke('update:check'),
+  onUpdateAvailable: (cb: (info: { version: string }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('update:available', h)
+    return () => ipcRenderer.removeListener('update:available', h)
+  },
+  onUpdateNotAvailable: (cb: (info: { version?: string }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('update:not-available', h)
+    return () => ipcRenderer.removeListener('update:not-available', h)
+  },
+  onUpdateProgress: (cb: (info: { percent: number }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('update:progress', h)
+    return () => ipcRenderer.removeListener('update:progress', h)
+  },
+  onUpdateReady: (cb: (info: { version: string }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('update:ready', h)
+    return () => ipcRenderer.removeListener('update:ready', h)
+  },
+  onUpdateError: (cb: (info: { message: string }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('update:error', h)
+    return () => ipcRenderer.removeListener('update:error', h)
+  },
   installUpdate: () => ipcRenderer.send('update:install'),
 
   // Backup
