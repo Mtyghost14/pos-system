@@ -5,7 +5,7 @@ import type { User } from '../types'
 import Modal from '../components/Modal'
 import PageShell from '../components/PageShell'
 
-type Tab = 'tienda' | 'impresora' | 'tickets' | 'facturacion' | 'usuarios' | 'respaldos' | 'actualizaciones'
+type Tab = 'tienda' | 'impresora' | 'tickets' | 'facturacion' | 'usuarios' | 'respaldos' | 'actualizaciones' | 'sincronizacion'
 
 export default function Settings() {
   const [tab, setTab] = useState<Tab>('tienda')
@@ -24,6 +24,7 @@ export default function Settings() {
     { id: 'usuarios', label: 'Usuarios' },
     { id: 'respaldos', label: 'Respaldos' },
     { id: 'actualizaciones', label: 'Actualizaciones' },
+    { id: 'sincronizacion', label: 'Sincronización' },
   ]
 
   return (
@@ -42,6 +43,7 @@ export default function Settings() {
       {tab === 'usuarios' && <UsersSettings showMsg={showMsg} />}
       {tab === 'respaldos' && <BackupsTab showMsg={showMsg} />}
       {tab === 'actualizaciones' && <UpdatesTab showMsg={showMsg} />}
+      {tab === 'sincronizacion' && <SyncTab showMsg={showMsg} />}
     </PageShell>
   )
 }
@@ -1090,6 +1092,148 @@ function UpdatesTab({ showMsg }: any) {
           >
             🔁 Reiniciar e instalar ahora
           </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SyncTab({ showMsg }: any) {
+  const [form, setForm] = useState({ supabase_url: '', supabase_anon_key: '', cloud_terminal_user: '', cloud_terminal_pass: '' })
+  const [status, setStatus] = useState<{ ready: boolean; configured: boolean }>({ ready: false, configured: false })
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; message?: string; count?: number } | null>(null)
+  const [migrating, setMigrating] = useState(false)
+  const [migResult, setMigResult] = useState<any>(null)
+  const [confirmMig, setConfirmMig] = useState(false)
+  const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
+
+  useEffect(() => {
+    window.api.getSettings().then((s: any) => setForm({
+      supabase_url: s.supabase_url || '',
+      supabase_anon_key: s.supabase_anon_key || '',
+      cloud_terminal_user: s.cloud_terminal_user || 'terminal',
+      cloud_terminal_pass: s.cloud_terminal_pass || '',
+    }))
+    window.api.cloudStatus().then(setStatus)
+    const off = window.api.onCloudStatus(() => window.api.cloudStatus().then(setStatus))
+    return () => { try { off?.() } catch {} }
+  }, [])
+
+  const handleSaveAndTest = async () => {
+    setTesting(true); setTestResult(null)
+    await window.api.saveSettings(form)
+    const res = await window.api.cloudTest()
+    setTestResult(res)
+    window.api.cloudStatus().then(setStatus)
+    setTesting(false)
+    if (res.ok) showMsg('Conectado a la nube')
+    else showMsg('No se pudo conectar', 'err')
+  }
+
+  const handleMigrate = async () => {
+    setConfirmMig(false); setMigrating(true); setMigResult(null)
+    const res = await window.api.cloudMigrateCatalog()
+    setMigResult(res)
+    setMigrating(false)
+    if (res.ok) showMsg(`Catálogo subido: ${res.uploaded} productos`)
+    else showMsg('La subida terminó con errores', 'err')
+  }
+
+  const card: React.CSSProperties = { background: 'var(--nm-bg)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 20 }
+  const input = 'mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500'
+
+  return (
+    <div style={{ maxWidth: 620, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ background: 'var(--nm-bg)', borderRadius: 16, boxShadow: 'var(--nm-inset)', padding: '14px 18px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+        <span style={{ fontSize: 22 }}>☁️</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--nm-text)', marginBottom: 4 }}>Inventario en la nube</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)', lineHeight: 1.5 }}>
+            Conecta este POS con la base compartida para que el inventario esté sincronizado con el portal web.
+            La URL y la llave ya vienen puestas — solo falta la contraseña de la cuenta <b>terminal</b>.
+          </div>
+        </div>
+      </div>
+
+      {/* Estado */}
+      <div style={{ ...card, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ width: 10, height: 10, borderRadius: '50%', background: status.ready ? 'var(--nm-success)' : 'var(--nm-danger)' }} />
+        <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--nm-text)' }}>
+          {status.ready ? 'Conectado a la nube' : status.configured ? 'Configurado, sin conexión' : 'Sin configurar'}
+        </span>
+      </div>
+
+      {/* Credenciales */}
+      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 900, color: 'var(--nm-text)' }}>Conexión</div>
+        <div>
+          <label className="text-sm font-medium text-gray-700">URL del proyecto</label>
+          <input value={form.supabase_url} onChange={e => set('supabase_url', e.target.value)} className={input} />
+        </div>
+        <div>
+          <label className="text-sm font-medium text-gray-700">Llave publishable</label>
+          <input value={form.supabase_anon_key} onChange={e => set('supabase_anon_key', e.target.value)} className={input} />
+        </div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <label className="text-sm font-medium text-gray-700">Usuario terminal</label>
+            <input value={form.cloud_terminal_user} onChange={e => set('cloud_terminal_user', e.target.value)} className={input} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label className="text-sm font-medium text-gray-700">Contraseña terminal</label>
+            <input type="password" value={form.cloud_terminal_pass} onChange={e => set('cloud_terminal_pass', e.target.value)} className={input} />
+          </div>
+        </div>
+        <button onClick={handleSaveAndTest} disabled={testing} className="nm-btn-accent"
+          style={{ padding: '12px', fontSize: 13, fontWeight: 800, opacity: testing ? 0.6 : 1 }}>
+          {testing ? 'Conectando…' : 'Guardar y conectar'}
+        </button>
+        {testResult && (
+          <div style={{ fontSize: 12, fontWeight: 700, color: testResult.ok ? 'var(--nm-success)' : 'var(--nm-danger)', lineHeight: 1.5 }}>
+            {testResult.ok ? `✅ Conexión correcta · ${testResult.count ?? 0} productos en la nube` : `⚠️ ${testResult.message}`}
+          </div>
+        )}
+      </div>
+
+      {/* Migración */}
+      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 900, color: 'var(--nm-text)' }}>Subir catálogo a la nube (primera vez)</div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)', lineHeight: 1.5 }}>
+          Sube los productos, categorías y códigos de este POS a la nube. Solo sube lo que aún no exista —
+          se puede repetir sin duplicar.
+        </div>
+        <button onClick={() => setConfirmMig(true)} disabled={!status.ready || migrating} className="nm-btn"
+          style={{ padding: '11px', fontSize: 13, fontWeight: 700, opacity: (!status.ready || migrating) ? 0.5 : 1 }}>
+          {migrating ? 'Subiendo…' : '⬆️ Subir catálogo'}
+        </button>
+        {migResult && (
+          <div style={{ fontSize: 12, fontWeight: 700, color: migResult.ok ? 'var(--nm-success)' : 'var(--nm-warning)', lineHeight: 1.6 }}>
+            {migResult.message
+              ? `⚠️ ${migResult.message}`
+              : `Subidos: ${migResult.uploaded} · Ya existían: ${migResult.skipped} · Códigos: ${migResult.barcodesUploaded} (de ${migResult.total})`}
+            {migResult.errors?.length > 0 && (
+              <div style={{ marginTop: 6, color: 'var(--nm-danger)', fontWeight: 600 }}>
+                {migResult.errors.map((e: string, i: number) => <div key={i}>· {e}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {confirmMig && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'var(--nm-bg)', borderRadius: 20, boxShadow: 'var(--nm-raised-lg)', padding: '28px', maxWidth: 380, width: '90%', textAlign: 'center' }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>⬆️</div>
+            <div style={{ fontSize: 15, fontWeight: 900, color: 'var(--nm-text)', marginBottom: 8 }}>¿Subir el catálogo a la nube?</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)', marginBottom: 20, lineHeight: 1.5 }}>
+              Se subirán los productos que aún no estén en la nube. No borra ni modifica lo que ya existe.
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setConfirmMig(false)} className="nm-btn" style={{ flex: 1, padding: '11px', fontSize: 13 }}>Cancelar</button>
+              <button onClick={handleMigrate} className="nm-btn-accent" style={{ flex: 1, padding: '11px', fontSize: 13 }}>Subir</button>
+            </div>
+          </div>
         </div>
       )}
     </div>

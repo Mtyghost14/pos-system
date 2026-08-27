@@ -3,6 +3,7 @@ import { join } from 'path'
 import { initDatabase } from './database'
 import { registerIpcHandlers } from './ipc-handlers'
 import { setupBackup } from './backup'
+import { initCloud } from './cloud'
 import { autoUpdater } from 'electron-updater'
 
 // Force GDI print path so older thermal printer drivers (e.g. Star TSP100)
@@ -63,6 +64,7 @@ app.whenReady().then(async () => {
     registerIpcHandlers()
     setupBackup()
     createWindow()
+    if (mainWindow) initCloud(mainWindow)
   } catch (err) {
     console.error('Error initializing app:', err)
   }

@@ -222,6 +222,17 @@ function runMigrations() {
   // Backfill plain_password for known seed users that were created before this feature
   db.prepare(`UPDATE users SET plain_password = 'admin123' WHERE username = 'admin' AND plain_password IS NULL`).run()
   db.prepare(`UPDATE users SET plain_password = 'cajero123' WHERE username = 'cajero1' AND plain_password IS NULL`).run()
+
+  // Conexión a la nube (Supabase). La URL y la llave publishable son públicas por
+  // diseño (las protege RLS). La contraseña de la cuenta "terminal" la escribe el
+  // dueño en Configuración → Sincronización. Ver src/main/cloud.ts
+  const cloudDefaults: [string, string][] = [
+    ['supabase_url', 'https://urvabzjutwaebobpmabw.supabase.co'],
+    ['supabase_anon_key', 'sb_publishable_QisIu_Fd2ztX9GOkJh3cFQ_2YttDGFR'],
+    ['cloud_terminal_user', 'terminal'],
+  ]
+  const insCloud = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)')
+  for (const [k, v] of cloudDefaults) insCloud.run(k, v)
 }
 
 function seedData() {

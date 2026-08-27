@@ -14,7 +14,7 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['better-sqlite3', 'bcryptjs', 'serialport', 'electron-pos-printer'],
+              external: ['better-sqlite3', 'bcryptjs', 'serialport', 'electron-pos-printer', 'ws'],
             },
           },
         },

@@ -128,6 +128,20 @@ const api = {
   },
   installUpdate: () => ipcRenderer.send('update:install'),
 
+  // Cloud sync (Supabase)
+  cloudStatus: (): Promise<{ ready: boolean; configured: boolean }> => ipcRenderer.invoke('cloud:status'),
+  cloudTest: (): Promise<{ ok: boolean; message?: string; count?: number }> => ipcRenderer.invoke('cloud:test'),
+  cloudMigrateCatalog: (): Promise<{ ok: boolean; message?: string; uploaded?: number; skipped?: number; barcodesUploaded?: number; total?: number; errors?: string[] }> =>
+    ipcRenderer.invoke('cloud:migrateCatalog'),
+  onCloudChanged: (cb: (info: { table: string; new?: any; old?: any }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('cloud:changed', h)
+    return () => ipcRenderer.removeListener('cloud:changed', h)
+  },
+  onCloudStatus: (cb: (info: { ready: boolean; message?: string }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('cloud:status', h)
+    return () => ipcRenderer.removeListener('cloud:status', h)
+  },
+
   // Backup
   createBackup: () => ipcRenderer.invoke('backup:create'),
   getBackups: () => ipcRenderer.invoke('backup:list'),
