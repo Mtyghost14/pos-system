@@ -133,6 +133,11 @@ const api = {
   cloudTest: (): Promise<{ ok: boolean; message?: string; count?: number }> => ipcRenderer.invoke('cloud:test'),
   cloudMigrateCatalog: (): Promise<{ ok: boolean; message?: string; uploaded?: number; skipped?: number; barcodesUploaded?: number; total?: number; errors?: string[] }> =>
     ipcRenderer.invoke('cloud:migrateCatalog'),
+  cloudSyncNow: (): Promise<{ ok: boolean; message?: string; products?: number }> => ipcRenderer.invoke('cloud:syncNow'),
+  onCloudCatalogSynced: (cb: (info: { products: number }) => void) => {
+    const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('cloud:catalog-synced', h)
+    return () => ipcRenderer.removeListener('cloud:catalog-synced', h)
+  },
   onCloudChanged: (cb: (info: { table: string; new?: any; old?: any }) => void) => {
     const h = (_: unknown, d: any) => cb(d); ipcRenderer.on('cloud:changed', h)
     return () => ipcRenderer.removeListener('cloud:changed', h)

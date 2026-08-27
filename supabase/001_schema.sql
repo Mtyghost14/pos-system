@@ -241,6 +241,32 @@ begin
   update public.products set active = false where id = p_id;
 end $$;
 
+-- Categorías (departamentos)
+create or replace function public.upsert_category(p_id bigint, p_name text)
+returns bigint language plpgsql security definer set search_path = public as $$
+declare v_id bigint;
+begin
+  if p_id is null then
+    insert into public.categories(name) values (trim(p_name))
+      on conflict (name) do update set name = excluded.name
+      returning id into v_id;
+  else
+    update public.categories set name = trim(p_name) where id = p_id returning id into v_id;
+    if v_id is null then raise exception 'Categoría % no existe', p_id; end if;
+  end if;
+  return v_id;
+end $$;
+
+create or replace function public.delete_category(p_id bigint)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if exists (select 1 from public.products where category_id = p_id and active) then
+    raise exception 'La categoría tiene productos activos';
+  end if;
+  update public.products set category_id = null where category_id = p_id;
+  delete from public.categories where id = p_id;
+end $$;
+
 -- Codigos adicionales
 create or replace function public.add_barcode(p_product_id bigint, p_code text, p_label text default null)
 returns void language plpgsql security definer set search_path = public as $$
@@ -365,6 +391,8 @@ grant execute on function
   public.adjust_stock(bigint,text,numeric,text,text),
   public.upsert_product(bigint,text,text,text,numeric,numeric,numeric,numeric),
   public.delete_product(bigint),
+  public.upsert_category(bigint,text),
+  public.delete_category(bigint),
   public.add_barcode(bigint,text,text),
   public.delete_barcode(bigint),
   public.commit_pos_sale(jsonb),

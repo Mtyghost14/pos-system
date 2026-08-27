@@ -29,6 +29,14 @@ function emailFor(user: string): string {
 export function isCloudReady(): boolean { return ready }
 export function getCloudClient(): SupabaseClient | null { return ready ? client : null }
 
+/** Llama a un RPC de la nube. Lanza si no hay conexión o si el RPC devuelve error. */
+export async function cloudRpc<T = any>(fn: string, args: Record<string, any>): Promise<T> {
+  if (!ready || !client) throw new Error('Sin conexión con la nube')
+  const { data, error } = await client.rpc(fn, args)
+  if (error) throw new Error(error.message)
+  return data as T
+}
+
 /** (Re)crea el cliente, inicia sesión como "terminal" y abre el canal realtime. */
 export async function reloadCloud(): Promise<{ ok: boolean; message?: string }> {
   ready = false
@@ -55,6 +63,9 @@ export async function reloadCloud(): Promise<{ ok: boolean; message?: string }> 
 
     ready = true
     subscribeRealtime()
+    void syncCatalogToLocal()
+    if (periodicTimer) clearInterval(periodicTimer)
+    periodicTimer = setInterval(() => { if (ready) void syncCatalogToLocal() }, 60_000)
     return { ok: true }
   } catch (e: any) {
     client = null
@@ -68,6 +79,7 @@ function subscribeRealtime() {
     .channel('pos-inventory')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, payload => {
       win?.webContents.send('cloud:changed', { table: 'products', new: payload.new, old: payload.old })
+      scheduleSync()
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_movements' }, payload => {
       win?.webContents.send('cloud:changed', { table: 'inventory_movements', new: payload.new })
@@ -75,6 +87,76 @@ function subscribeRealtime() {
     .subscribe(status => {
       win?.webContents.send('cloud:realtime', { status })
     })
+}
+
+// ─── Cache local del catálogo ───────────────────────────────────────────────
+// La nube es la fuente de verdad; el POS mantiene una copia local de
+// categories / products / product_barcodes para leer rápido y offline.
+// Se refresca al conectar, cada 60 s, y ante cualquier cambio realtime.
+
+let syncTimer: NodeJS.Timeout | null = null
+let periodicTimer: NodeJS.Timeout | null = null
+let syncing = false
+
+function scheduleSync(delayMs = 400) {
+  if (syncTimer) clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => { void syncCatalogToLocal() }, delayMs)
+}
+
+export async function syncCatalogToLocal(): Promise<{ ok: boolean; message?: string; products?: number }> {
+  if (!ready || !client) return { ok: false, message: 'Sin conexión con la nube' }
+  if (syncing) return { ok: true }
+  syncing = true
+  try {
+    const [cats, prods, bcs] = await Promise.all([
+      client.from('categories').select('id,name'),
+      client.from('products').select('id,code,name,category_id,cost,price,stock,min_stock,active'),
+      client.from('product_barcodes').select('id,product_id,code,label'),
+    ])
+    const err = cats.error || prods.error || bcs.error
+    if (err) return { ok: false, message: err.message }
+
+    const db = getDb()
+    // Upsert por clave natural (code / name) conservando el id local (los renglones
+    // de venta históricos lo referencian). `cloud_id` mapea al id de la nube.
+    const tx = db.transaction(() => {
+      const upCat = db.prepare(`INSERT INTO categories (name, cloud_id) VALUES (?, ?)
+        ON CONFLICT(name) DO UPDATE SET cloud_id = excluded.cloud_id`)
+      for (const c of cats.data as any[]) upCat.run(c.name, c.id)
+
+      db.prepare('UPDATE products SET active = 0 WHERE cloud_id IS NOT NULL').run()
+      const upProd = db.prepare(`INSERT INTO products
+          (code, name, category_id, cost, price, stock, min_stock, active, cloud_id, updated_at)
+          VALUES (@code, @name,
+                  (SELECT id FROM categories WHERE cloud_id = @cat),
+                  @cost, @price, @stock, @min_stock, @active, @cid, datetime('now','localtime'))
+          ON CONFLICT(code) DO UPDATE SET
+            name = excluded.name, category_id = excluded.category_id,
+            cost = excluded.cost, price = excluded.price, stock = excluded.stock,
+            min_stock = excluded.min_stock, active = excluded.active,
+            cloud_id = excluded.cloud_id, updated_at = excluded.updated_at`)
+      for (const p of prods.data as any[]) upProd.run({
+        code: String(p.code), name: p.name, cat: p.category_id,
+        cost: p.cost ?? 0, price: p.price ?? 0, stock: p.stock ?? 0, min_stock: p.min_stock ?? 0,
+        active: p.active ? 1 : 0, cid: p.id,
+      })
+
+      db.prepare('DELETE FROM product_barcodes WHERE cloud_id IS NOT NULL').run()
+      const upBc = db.prepare(`INSERT INTO product_barcodes (product_id, code, label, cloud_id)
+          VALUES ((SELECT id FROM products WHERE cloud_id = ?), ?, ?, ?)
+          ON CONFLICT(code) DO UPDATE SET
+            product_id = excluded.product_id, label = excluded.label, cloud_id = excluded.cloud_id`)
+      for (const b of bcs.data as any[]) upBc.run(b.product_id, String(b.code), b.label ?? null, b.id)
+    })
+    tx()
+
+    win?.webContents.send('cloud:catalog-synced', { products: (prods.data as any[]).length })
+    return { ok: true, products: (prods.data as any[]).length }
+  } catch (e: any) {
+    return { ok: false, message: e?.message || 'Error al sincronizar catálogo' }
+  } finally {
+    syncing = false
+  }
 }
 
 export function initCloud(browserWindow: BrowserWindow) {
@@ -94,6 +176,8 @@ function registerCloudHandlers() {
     const configured = !!(cfg.supabase_url && cfg.supabase_anon_key && cfg.cloud_terminal_user && cfg.cloud_terminal_pass)
     return { ready, configured }
   })
+
+  ipcMain.handle('cloud:syncNow', () => syncCatalogToLocal())
 
   // Guarda credenciales y reconecta; devuelve un conteo de productos como prueba real.
   ipcMain.handle('cloud:test', async () => {

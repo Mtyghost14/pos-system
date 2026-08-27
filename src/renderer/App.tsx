@@ -144,6 +144,42 @@ function UpdateBanner() {
   )
 }
 
+function CloudBanner() {
+  const [state, setState] = useState<'ok' | 'offline' | 'unset'>('ok')
+
+  useEffect(() => {
+    let alive = true
+    const check = async () => {
+      try {
+        const s = await window.api.cloudStatus()
+        if (!alive) return
+        setState(s.ready ? 'ok' : s.configured ? 'offline' : 'unset')
+      } catch { /* ignore */ }
+    }
+    check()
+    const off = window.api.onCloudStatus((s: any) => {
+      setState(s.ready ? 'ok' : 'offline')
+    })
+    const iv = setInterval(check, 8000)
+    return () => { alive = false; clearInterval(iv); try { off?.() } catch {} }
+  }, [])
+
+  if (state === 'ok') return null
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9997,
+      background: state === 'unset' ? '#8a6d00' : '#b3261e', color: '#fff',
+      padding: '8px 16px', textAlign: 'center', fontSize: 13, fontWeight: 700,
+      boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+    }}>
+      {state === 'unset'
+        ? '⚙️ Sincronización con la nube sin configurar — Configuración → Sincronización'
+        : '☁️ Sin conexión con la nube — no se pueden registrar ventas ni ajustes de inventario hasta reconectar'}
+    </div>
+  )
+}
+
 export default function App() {
   const { loadSettings } = useSettingsStore()
 
@@ -155,6 +191,7 @@ export default function App() {
     <HashRouter>
       <CloseGuard />
       <UpdateBanner />
+      <CloudBanner />
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>

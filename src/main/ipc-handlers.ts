@@ -1,5 +1,6 @@
 import { ipcMain, dialog, app, BrowserWindow } from 'electron'
 import { getDb, checkpointDb, closeDb } from './database'
+import { isCloudReady, getCloudClient, cloudRpc, syncCatalogToLocal } from './cloud'
 import bcrypt from 'bcryptjs'
 import { join } from 'path'
 import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'fs'
@@ -62,36 +63,39 @@ export function registerIpcHandlers() {
     return { success: true }
   })
 
-  // ─── CATEGORIES ─────────────────────────────────────────────────────────────
+  // ── Cloud helpers (Fase 1: catálogo vive en la nube, local es cache) ────────
+  const cloudPid = (localId: number): number => {
+    const r = db.prepare('SELECT cloud_id FROM products WHERE id = ?').get(localId) as any
+    if (!r?.cloud_id) throw new Error('Producto no sincronizado con la nube')
+    return r.cloud_id
+  }
+  const cloudCid = (localId: number): number | null => {
+    const r = db.prepare('SELECT cloud_id FROM categories WHERE id = ?').get(localId) as any
+    return r?.cloud_id ?? null
+  }
+  const categoryNameFor = (localCatId: any): string | null => {
+    if (!localCatId) return null
+    const r = db.prepare('SELECT name FROM categories WHERE id = ?').get(localCatId) as any
+    return r?.name ?? null
+  }
+  const okOr = async (fn: () => Promise<void>): Promise<{ success: boolean; message?: string }> => {
+    try { await fn(); await syncCatalogToLocal(); return { success: true } }
+    catch (e: any) { return { success: false, message: e?.message || 'Error' } }
+  }
+
+  // ─── CATEGORIES (escritura → nube; lectura → cache) ─────────────────────────
   ipcMain.handle('categories:getAll', () => {
     return db.prepare('SELECT * FROM categories ORDER BY name').all()
   })
 
-  ipcMain.handle('categories:create', (_, name: string) => {
-    const exists = db.prepare('SELECT id FROM categories WHERE name = ?').get(name)
-    if (exists) return { success: false, message: 'La categoría ya existe' }
-    const res = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name)
-    return { success: true, id: res.lastInsertRowid }
-  })
+  ipcMain.handle('categories:create', (_, name: string) =>
+    okOr(() => cloudRpc('upsert_category', { p_id: null, p_name: name })))
 
-  ipcMain.handle('categories:update', (_, id: number, name: string) => {
-    db.prepare('UPDATE categories SET name = ? WHERE id = ?').run(name, id)
-    return { success: true }
-  })
+  ipcMain.handle('categories:update', (_, id: number, name: string) =>
+    okOr(() => cloudRpc('upsert_category', { p_id: cloudCid(id), p_name: name })))
 
-  ipcMain.handle('categories:delete', (_, id: number) => {
-    try {
-      const used = db.prepare('SELECT id FROM products WHERE category_id = ? AND active = 1 LIMIT 1').get(id)
-      if (used) return { success: false, message: 'La categoría tiene productos activos' }
-      // Inactive (soft-deleted) products still reference this category — clear them first
-      // so the foreign key constraint doesn't block the delete
-      db.prepare('UPDATE products SET category_id = NULL WHERE category_id = ?').run(id)
-      db.prepare('DELETE FROM categories WHERE id = ?').run(id)
-      return { success: true }
-    } catch (e: any) {
-      return { success: false, message: e?.message || 'Error al eliminar' }
-    }
-  })
+  ipcMain.handle('categories:delete', (_, id: number) =>
+    okOr(() => cloudRpc('delete_category', { p_id: cloudCid(id) })))
 
   // ─── PRODUCTS ───────────────────────────────────────────────────────────────
   ipcMain.handle('products:getAll', (_, query?: string) => {
@@ -151,97 +155,91 @@ export function registerIpcHandlers() {
     return product
   })
 
-  ipcMain.handle('products:create', (_, data: any) => {
-    // Check if an ACTIVE product already uses this code
-    const activeConflict = db.prepare('SELECT id FROM products WHERE code = ? AND active = 1').get(data.code)
-    if (activeConflict) return { success: false, message: 'El código ya está en uso por otro producto activo' }
-
-    // If a deleted product had this code, reuse its row instead of inserting a new one
-    const deleted = db.prepare('SELECT id FROM products WHERE code = ? AND active = 0').get(data.code) as any
-    let res: any
-    if (deleted) {
-      db.prepare(`
-        UPDATE products SET name=?, category_id=?, cost=?, price=?, stock=?, min_stock=?, active=1, updated_at=datetime('now','localtime')
-        WHERE id=?
-      `).run(data.name, data.category_id, data.cost, data.price, data.stock || 0, data.min_stock || 0, deleted.id)
-      res = { lastInsertRowid: deleted.id }
-    } else {
-      res = db.prepare(`
-        INSERT INTO products (code, name, category_id, cost, price, stock, min_stock)
-        VALUES (?,?,?,?,?,?,?)
-      `).run(data.code, data.name, data.category_id, data.cost, data.price, data.stock || 0, data.min_stock || 0)
+  ipcMain.handle('products:create', async (_, data: any) => {
+    try {
+      await cloudRpc('upsert_product', {
+        p_id: null,
+        p_code: String(data.code),
+        p_name: data.name,
+        p_category: categoryNameFor(data.category_id),
+        p_cost: data.cost ?? 0,
+        p_price: data.price ?? 0,
+        p_min_stock: data.min_stock ?? 0,
+        p_stock: data.stock ?? 0,
+      })
+      await syncCatalogToLocal()
+      const row = db.prepare('SELECT id FROM products WHERE code = ?').get(String(data.code)) as any
+      return { success: true, id: row?.id }
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'Error al crear producto' }
     }
-
-    if (data.stock > 0) {
-      db.prepare(`
-        INSERT INTO inventory_movements (product_id, type, quantity_before, quantity_change, quantity_after, notes, cashier_id)
-        VALUES (?,?,?,?,?,?,?)
-      `).run(res.lastInsertRowid, 'recepcion', 0, data.stock, data.stock, 'Stock inicial', data.cashier_id || 1)
-    }
-    return { success: true, id: res.lastInsertRowid }
   })
 
-  ipcMain.handle('products:update', (_, data: any) => {
-    // If code is being changed, check it's not taken by another product
-    if (data.code) {
-      const conflict = db.prepare('SELECT id FROM products WHERE code = ? AND id != ? AND active = 1').get(data.code, data.id) as any
-      if (conflict) return { success: false, message: 'Ese código ya está en uso por otro producto' }
-      const conflictBarcode = db.prepare('SELECT id FROM product_barcodes WHERE code = ? AND product_id != ?').get(data.code, data.id) as any
-      if (conflictBarcode) return { success: false, message: 'Ese código ya está registrado como código adicional de otro producto' }
-      db.prepare(`
-        UPDATE products SET code=?, name=?, category_id=?, cost=?, price=?, min_stock=?, updated_at=datetime('now','localtime')
-        WHERE id=?
-      `).run(data.code, data.name, data.category_id, data.cost, data.price, data.min_stock, data.id)
-    } else {
-      db.prepare(`
-        UPDATE products SET name=?, category_id=?, cost=?, price=?, min_stock=?, updated_at=datetime('now','localtime')
-        WHERE id=?
-      `).run(data.name, data.category_id, data.cost, data.price, data.min_stock, data.id)
+  ipcMain.handle('products:update', async (_, data: any) => {
+    try {
+      const cur = db.prepare('SELECT code FROM products WHERE id = ?').get(data.id) as any
+      await cloudRpc('upsert_product', {
+        p_id: cloudPid(data.id),
+        p_code: String(data.code || cur?.code),
+        p_name: data.name,
+        p_category: categoryNameFor(data.category_id),
+        p_cost: data.cost ?? 0,
+        p_price: data.price ?? 0,
+        p_min_stock: data.min_stock ?? 0,
+        p_stock: null,
+      })
+      await syncCatalogToLocal()
+      return { success: true }
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'Error al actualizar producto' }
     }
-    return { success: true }
   })
+
+  ipcMain.handle('products:delete', (_, id: number) =>
+    okOr(() => cloudRpc('delete_product', { p_id: cloudPid(id) })))
 
   // ── Extra barcodes ──────────────────────────────────────────────────────────
   ipcMain.handle('barcodes:getByProduct', (_, productId: number) => {
     return db.prepare('SELECT * FROM product_barcodes WHERE product_id = ? ORDER BY id').all(productId)
   })
 
-  ipcMain.handle('barcodes:add', (_, data: { product_id: number; code: string; label?: string }) => {
-    const conflict = db.prepare('SELECT id FROM products WHERE code = ?').get(data.code) as any
-    if (conflict) return { success: false, message: 'Ese código ya es el código principal de un producto' }
-    const conflictBarcode = db.prepare('SELECT id FROM product_barcodes WHERE code = ?').get(data.code) as any
-    if (conflictBarcode) return { success: false, message: 'Ese código ya está registrado en otro producto' }
-    db.prepare('INSERT INTO product_barcodes (product_id, code, label) VALUES (?,?,?)').run(data.product_id, data.code, data.label || null)
-    return { success: true }
-  })
+  ipcMain.handle('barcodes:add', (_, data: { product_id: number; code: string; label?: string }) =>
+    okOr(() => cloudRpc('add_barcode', {
+      p_product_id: cloudPid(data.product_id),
+      p_code: String(data.code),
+      p_label: data.label || null,
+    })))
 
   ipcMain.handle('barcodes:delete', (_, id: number) => {
-    db.prepare('DELETE FROM product_barcodes WHERE id = ?').run(id)
-    return { success: true }
+    const r = db.prepare('SELECT cloud_id FROM product_barcodes WHERE id = ?').get(id) as any
+    if (!r?.cloud_id) return { success: false, message: 'Código no sincronizado' }
+    return okOr(() => cloudRpc('delete_barcode', { p_id: r.cloud_id }))
   })
 
-  ipcMain.handle('products:delete', (_, id: number) => {
-    db.prepare('UPDATE products SET active = 0 WHERE id = ?').run(id)
-    return { success: true }
-  })
-
-  ipcMain.handle('products:import', (_, rows: any[]) => {
-    const insert = db.prepare(`
-      INSERT INTO products (code, name, category_id, cost, price, stock, min_stock)
-      VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT(code) DO UPDATE SET
-        name=excluded.name, cost=excluded.cost, price=excluded.price, min_stock=excluded.min_stock,
-        active=1, updated_at=datetime('now','localtime')
-    `)
+  ipcMain.handle('products:import', async (_, rows: any[]) => {
+    if (!isCloudReady()) return { success: false, message: 'Sin conexión con la nube' }
     let imported = 0, updated = 0
+    const errors: string[] = []
+    const have = new Set((db.prepare('SELECT code FROM products WHERE cloud_id IS NOT NULL').all() as any[]).map(r => r.code))
     for (const row of rows) {
-      const catRow = db.prepare('SELECT id FROM categories WHERE name = ?').get(row.category) as any
-      const catId = catRow?.id || null
-      const exists = db.prepare('SELECT id FROM products WHERE code = ?').get(row.code)
-      insert.run(row.code, row.name, catId, row.cost || 0, row.price || 0, row.stock || 0, row.min_stock || 0)
-      if (exists) updated++; else imported++
+      try {
+        await cloudRpc('upsert_product', {
+          p_id: null,
+          p_code: String(row.code),
+          p_name: row.name,
+          p_category: row.category || null,
+          p_cost: row.cost || 0,
+          p_price: row.price || 0,
+          p_min_stock: row.min_stock || 0,
+          p_stock: row.stock || 0,
+        })
+        if (have.has(String(row.code))) updated++; else imported++
+      } catch (e: any) {
+        errors.push(`${row.code}: ${e?.message || 'error'}`)
+      }
     }
-    return { success: true, imported, updated }
+    await syncCatalogToLocal()
+    return { success: errors.length === 0, imported, updated, errors: errors.slice(0, 20) }
   })
 
   ipcMain.handle('products:export', () => {
@@ -377,79 +375,80 @@ export function registerIpcHandlers() {
   })
 
   // ─── SALES ──────────────────────────────────────────────────────────────────
-  ipcMain.handle('sales:create', (_, data: any) => {
+  ipcMain.handle('sales:create', async (_, data: any) => {
+    if (!isCloudReady()) {
+      return { success: false, message: 'Sin conexión con la nube. No se puede registrar la venta.' }
+    }
     const folio = generateFolio()
 
-    const saleStmt = db.prepare(`
-      INSERT INTO sales (folio, cashier_id, payment_type, total, cost_total, received_amount, change_amount, payment_details, shift_id)
-      VALUES (?,?,?,?,?,?,?,?,?)
-    `)
-
-    const itemStmt = db.prepare(`
-      INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, unit_cost, discount)
-      VALUES (?,?,?,?,?,?)
-    `)
-
-    const updateStockStmt = db.prepare(`
-      UPDATE products SET stock = stock - ?, updated_at = datetime('now','localtime') WHERE id = ?
-    `)
-
-    const invMovStmt = db.prepare(`
-      INSERT INTO inventory_movements (product_id, type, quantity_before, quantity_change, quantity_after, cashier_id, reference_id, notes)
-      VALUES (?,?,?,?,?,?,?,?)
-    `)
-
-    // Validate stock before deducting
-    for (const item of data.items) {
-      const p = db.prepare('SELECT stock, name FROM products WHERE id = ?').get(item.product_id) as any
-      if (p && p.stock < item.quantity) {
-        return { success: false, message: `Stock insuficiente: "${p.name}" (disponible: ${p.stock}, solicitado: ${item.quantity})` }
+    // Datos de producto desde el cache local (código, nombre, costo)
+    const items = (data.items || []).map((it: any) => {
+      const p = db.prepare('SELECT code, name, cost FROM products WHERE id = ?').get(it.product_id) as any
+      return {
+        product_id: it.product_id,
+        code: p?.code, name: p?.name,
+        qty: it.quantity,
+        unit_price: it.unit_price,
+        unit_cost: p?.cost ?? 0,
+        discount: it.discount || 0,
       }
+    })
+    if (items.some((i: any) => !i.code)) {
+      return { success: false, message: 'Un producto del carrito no está en el catálogo. Sincroniza e intenta de nuevo.' }
     }
+    const costTotal = items.reduce((s: number, i: any) => s + i.unit_cost * i.qty, 0)
 
-    let costTotal = 0
-    for (const item of data.items) {
-      const p = db.prepare('SELECT cost, stock FROM products WHERE id = ?').get(item.product_id) as any
-      if (p) costTotal += (p.cost || 0) * item.quantity
-    }
-
-    // Determine effective payment type and cash amount
     const paymentDetails: Record<string, number> = data.payment_details || {}
     const hasMixed = Object.keys(paymentDetails).length > 1
     const effectiveType = hasMixed ? 'mixto' : (data.payment_type || 'efectivo')
     const cashAmount = paymentDetails['efectivo'] ?? (data.payment_type === 'efectivo' ? data.total : 0)
     const detailsJson = hasMixed ? JSON.stringify(paymentDetails) : null
+    const cashierName = (db.prepare('SELECT name FROM users WHERE id = ?').get(data.cashier_id) as any)?.name || ''
 
-    const tx = db.transaction(() => {
-      const saleRes = saleStmt.run(
-        folio, data.cashier_id, effectiveType, data.total, costTotal,
-        data.received_amount || data.total, data.change_amount || 0,
-        detailsJson, data.shift_id
-      )
-      const saleId = saleRes.lastInsertRowid
+    // 1) Nube: descuento de stock autoritativo + espejo de la venta (todo o nada)
+    try {
+      await cloudRpc('commit_pos_sale', { p_sale: {
+        folio, pos_sale_id: null, cashier_name: cashierName, payment_type: effectiveType,
+        total: data.total, cost_total: costTotal, sold_at: new Date().toISOString(),
+        items: items.map((i: any) => ({
+          code: i.code, name: i.name, qty: i.qty,
+          unit_price: i.unit_price, unit_cost: i.unit_cost, discount: i.discount,
+        })),
+      } })
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'La nube rechazó la venta' }
+    }
 
-      for (const item of data.items) {
-        const p = db.prepare('SELECT cost, stock FROM products WHERE id = ?').get(item.product_id) as any
-        itemStmt.run(saleId, item.product_id, item.quantity, item.unit_price, p?.cost || 0, item.discount || 0)
+    // 2) Local: lado dinero (sin tocar stock ni inventory_movements — eso vive en la nube)
+    let saleId: any
+    try {
+      const tx = db.transaction(() => {
+        const saleRes = db.prepare(`
+          INSERT INTO sales (folio, cashier_id, payment_type, total, cost_total, received_amount, change_amount, payment_details, shift_id)
+          VALUES (?,?,?,?,?,?,?,?,?)
+        `).run(folio, data.cashier_id, effectiveType, data.total, costTotal,
+               data.received_amount || data.total, data.change_amount || 0, detailsJson, data.shift_id)
+        saleId = saleRes.lastInsertRowid
+        const itemStmt = db.prepare(`
+          INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, unit_cost, discount, product_code, product_name)
+          VALUES (?,?,?,?,?,?,?,?)
+        `)
+        for (const i of items) {
+          itemStmt.run(saleId, i.product_id, i.qty, i.unit_price, i.unit_cost, i.discount, i.code, i.name)
+        }
+        if (cashAmount > 0) {
+          db.prepare(`INSERT INTO cash_movements (shift_id, type, amount, concept, cashier_id) VALUES (?,?,?,?,?)`)
+            .run(data.shift_id, 'venta', cashAmount, `Venta ${folio}`, data.cashier_id)
+        }
+      })
+      tx()
+    } catch (e: any) {
+      // La nube ya descontó stock — revertir para no dejar inconsistencia
+      try { await cloudRpc('cancel_pos_sale', { p_folio: folio }) } catch { /* ignore */ }
+      return { success: false, message: 'Error al guardar la venta: ' + (e?.message || '') }
+    }
 
-        const stockBefore = p?.stock || 0
-        const stockAfter = stockBefore - item.quantity
-        updateStockStmt.run(item.quantity, item.product_id)
-        invMovStmt.run(item.product_id, 'venta', stockBefore, -item.quantity, stockAfter, data.cashier_id, saleId, `Venta ${folio}`)
-      }
-
-      // Record cash movement only for the efectivo portion
-      if (cashAmount > 0) {
-        db.prepare(`
-          INSERT INTO cash_movements (shift_id, type, amount, concept, cashier_id)
-          VALUES (?,?,?,?,?)
-        `).run(data.shift_id, 'venta', cashAmount, `Venta ${folio}`, data.cashier_id)
-      }
-
-      return saleId
-    })
-
-    const saleId = tx()
+    void syncCatalogToLocal()
     return { success: true, folio, id: saleId }
   })
 
@@ -502,83 +501,81 @@ export function registerIpcHandlers() {
     return sale
   })
 
-  ipcMain.handle('sales:cancel', (_, { sale_id, reason, cancelled_by }: { sale_id: number; reason: string; cancelled_by: number }) => {
+  ipcMain.handle('sales:cancel', async (_, { sale_id, reason, cancelled_by }: { sale_id: number; reason: string; cancelled_by: number }) => {
     const sale = db.prepare('SELECT * FROM sales WHERE id = ?').get(sale_id) as any
     if (!sale) return { success: false, message: 'Venta no encontrada' }
     if (sale.cancelled) return { success: false, message: 'Esta venta ya fue cancelada' }
+    if (!isCloudReady()) return { success: false, message: 'Sin conexión con la nube. No se puede cancelar.' }
 
-    const cancelSale = db.transaction(() => {
-      // Mark sale as cancelled
-      db.prepare(`
-        UPDATE sales SET cancelled=1, cancelled_at=datetime('now','localtime'),
-        cancelled_by=?, cancel_reason=? WHERE id=?
-      `).run(cancelled_by, reason || 'Error del cajero', sale_id)
-
-      // Restore stock for each item
-      const items = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?').all(sale_id) as any[]
-      for (const item of items) {
-        db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(item.quantity, item.product_id)
-      }
-
-      // If cash involved, record as devolucion to subtract from cash balance
-      const cashAmount = (() => {
-        if (sale.payment_type === 'efectivo') return sale.total
-        if (sale.payment_type === 'mixto' && sale.payment_details) {
-          try {
-            const cashTendered = JSON.parse(sale.payment_details).efectivo || 0
-            // El cambio siempre se entrega en efectivo, así que el efectivo neto en caja es lo recibido menos el cambio
-            return Math.max(0, cashTendered - (sale.change_amount || 0))
-          } catch { return 0 }
-        }
-        return 0
-      })()
-
-      if (cashAmount > 0 && sale.shift_id) {
-        db.prepare(`
-          INSERT INTO cash_movements (shift_id, type, amount, concept, cashier_id)
-          VALUES (?, 'devolucion', ?, ?, ?)
-        `).run(sale.shift_id, cashAmount, `Cancelación ${sale.folio}`, cancelled_by)
-      }
-    })
-
+    // 1) Nube: regresa el stock y marca el espejo
     try {
-      cancelSale()
-      return { success: true }
+      await cloudRpc('cancel_pos_sale', { p_folio: sale.folio })
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'La nube rechazó la cancelación' }
+    }
+
+    // 2) Local: marca la venta y el movimiento de caja (el stock ya lo regresó la nube)
+    try {
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE sales SET cancelled=1, cancelled_at=datetime('now','localtime'),
+          cancelled_by=?, cancel_reason=? WHERE id=?
+        `).run(cancelled_by, reason || 'Error del cajero', sale_id)
+
+        const cashAmount = (() => {
+          if (sale.payment_type === 'efectivo') return sale.total
+          if (sale.payment_type === 'mixto' && sale.payment_details) {
+            try {
+              const cashTendered = JSON.parse(sale.payment_details).efectivo || 0
+              return Math.max(0, cashTendered - (sale.change_amount || 0))
+            } catch { return 0 }
+          }
+          return 0
+        })()
+
+        if (cashAmount > 0 && sale.shift_id) {
+          db.prepare(`
+            INSERT INTO cash_movements (shift_id, type, amount, concept, cashier_id)
+            VALUES (?, 'devolucion', ?, ?, ?)
+          `).run(sale.shift_id, cashAmount, `Cancelación ${sale.folio}`, cancelled_by)
+        }
+      })()
     } catch (err: any) {
       return { success: false, message: err.message }
     }
+
+    void syncCatalogToLocal()
+    return { success: true }
   })
 
-  // ─── INVENTORY ──────────────────────────────────────────────────────────────
-  ipcMain.handle('inventory:adjust', (_, data: any) => {
-    const product = db.prepare('SELECT stock FROM products WHERE id = ?').get(data.product_id) as any
-    if (!product) return { success: false, message: 'Producto no encontrado' }
-
-    const before = product.stock
-    let after: number
-
-    if (data.mode === 'set') {
-      after = data.quantity
-    } else {
-      after = before + data.quantity
+  // ─── INVENTORY (ajustes → nube; lecturas de stock → cache; movimientos → nube) ─
+  ipcMain.handle('inventory:adjust', async (_, data: any) => {
+    if (!isCloudReady()) return { success: false, message: 'Sin conexión con la nube' }
+    try {
+      // Cambio de costo/precio opcional (no lo hace adjust_stock)
+      if (data.new_cost != null || data.new_price != null) {
+        const p = db.prepare('SELECT code, name, category_id, cost, price, min_stock FROM products WHERE id = ?').get(data.product_id) as any
+        if (!p) return { success: false, message: 'Producto no encontrado' }
+        await cloudRpc('upsert_product', {
+          p_id: cloudPid(data.product_id),
+          p_code: String(p.code), p_name: p.name,
+          p_category: categoryNameFor(p.category_id),
+          p_cost: data.new_cost ?? p.cost, p_price: data.new_price ?? p.price,
+          p_min_stock: p.min_stock, p_stock: null,
+        })
+      }
+      await cloudRpc('adjust_stock', {
+        p_product_id: cloudPid(data.product_id),
+        p_mode: data.mode === 'set' ? 'set' : 'add',
+        p_qty: data.quantity,
+        p_type: 'ajuste',
+        p_reference: data.notes || null,
+      })
+      await syncCatalogToLocal()
+      return { success: true }
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'Error al ajustar inventario' }
     }
-
-    if (after < 0) return { success: false, message: 'El stock no puede ser negativo' }
-
-    const tx = db.transaction(() => {
-      db.prepare(`
-        UPDATE products SET stock = ?, cost = COALESCE(?, cost), price = COALESCE(?, price),
-        updated_at = datetime('now','localtime') WHERE id = ?
-      `).run(after, data.new_cost || null, data.new_price || null, data.product_id)
-
-      db.prepare(`
-        INSERT INTO inventory_movements (product_id, type, quantity_before, quantity_change, quantity_after, cashier_id, notes)
-        VALUES (?,?,?,?,?,?,?)
-      `).run(data.product_id, 'ajuste', before, after - before, after, data.cashier_id, data.notes)
-    })
-    tx()
-
-    return { success: true }
   })
 
   ipcMain.handle('inventory:getLowStock', () => {
@@ -599,23 +596,33 @@ export function registerIpcHandlers() {
     `).all()
   })
 
-  ipcMain.handle('inventory:getMovements', (_, filters: any) => {
-    let query = `
-      SELECT im.*, p.name as product_name, p.code as product_code,
-             c.name as category_name, u.name as cashier_name
-      FROM inventory_movements im
-      JOIN products p ON im.product_id = p.id
-      LEFT JOIN categories c ON p.category_id = c.id
-      LEFT JOIN users u ON im.cashier_id = u.id
-      WHERE 1=1
-    `
-    const params: any[] = []
-    if (filters?.product_id) { query += ' AND im.product_id = ?'; params.push(filters.product_id) }
-    if (filters?.type) { query += ' AND im.type = ?'; params.push(filters.type) }
-    if (filters?.from) { query += ' AND DATE(im.timestamp) >= ?'; params.push(filters.from) }
-    if (filters?.to) { query += ' AND DATE(im.timestamp) <= ?'; params.push(filters.to) }
-    query += ' ORDER BY im.timestamp DESC'
-    return db.prepare(query).all(...params)
+  ipcMain.handle('inventory:getMovements', async (_, filters: any) => {
+    const cl = getCloudClient()
+    if (!cl) return []
+    let q = cl.from('inventory_movements')
+      .select('id,type,qty_before,qty_change,qty_after,actor,source,reference,created_at,products(code,name,categories(name))')
+      .order('created_at', { ascending: false })
+      .limit(1000)
+    if (filters?.product_id) q = q.eq('product_id', cloudPid(filters.product_id))
+    if (filters?.type) q = q.eq('type', filters.type)
+    if (filters?.from) q = q.gte('created_at', filters.from)
+    if (filters?.to) q = q.lte('created_at', filters.to + 'T23:59:59')
+    const { data, error } = await q
+    if (error) return []
+    return (data as any[]).map(m => ({
+      id: m.id,
+      type: m.type,
+      quantity_before: m.qty_before,
+      quantity_change: m.qty_change,
+      quantity_after: m.qty_after,
+      cashier_name: m.actor,
+      source: m.source,
+      notes: m.reference,
+      timestamp: m.created_at,
+      product_code: m.products?.code ?? null,
+      product_name: m.products?.name ?? null,
+      category_name: m.products?.categories?.name ?? null,
+    }))
   })
 
   // ─── PROMOTIONS ─────────────────────────────────────────────────────────────

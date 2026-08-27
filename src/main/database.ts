@@ -233,6 +233,25 @@ function runMigrations() {
   ]
   const insCloud = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)')
   for (const [k, v] of cloudDefaults) insCloud.run(k, v)
+
+  // Fase 1: el catálogo pasa a vivir en la nube y la tabla local `products` es
+  // solo un cache que se borra y reconstruye al sincronizar. Guardamos el código
+  // y el nombre del producto en cada renglón de venta para que los reportes
+  // históricos no dependan de la fila de producto (que puede desaparecer).
+  try { db.exec('ALTER TABLE sale_items ADD COLUMN product_code TEXT') } catch { /* exists */ }
+  try { db.exec('ALTER TABLE sale_items ADD COLUMN product_name TEXT') } catch { /* exists */ }
+  db.exec(`
+    UPDATE sale_items SET
+      product_code = (SELECT code FROM products WHERE products.id = sale_items.product_id),
+      product_name = (SELECT name FROM products WHERE products.id = sale_items.product_id)
+    WHERE product_code IS NULL
+  `)
+
+  // `cloud_id` mapea cada fila del cache local con su id en Supabase.
+  try { db.exec('ALTER TABLE products ADD COLUMN cloud_id INTEGER') } catch { /* exists */ }
+  try { db.exec('ALTER TABLE categories ADD COLUMN cloud_id INTEGER') } catch { /* exists */ }
+  try { db.exec('ALTER TABLE product_barcodes ADD COLUMN cloud_id INTEGER') } catch { /* exists */ }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_cloud_id ON products(cloud_id)')
 }
 
 function seedData() {

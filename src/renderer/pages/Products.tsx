@@ -25,6 +25,12 @@ export default function Products() {
 
   useEffect(() => { loadCategories(); loadProducts() }, [])
 
+  // Refrescar cuando la nube sincroniza (cambios hechos desde el portal web)
+  useEffect(() => {
+    const off = (window.api as any).onCloudCatalogSynced?.(() => { loadCategories(); loadProducts() })
+    return () => { try { off?.() } catch {} }
+  }, [])
+
   const showMsg = (m: string, type: 'ok' | 'err' = 'ok') => {
     setMsg(m); setMsgType(type)
     setTimeout(() => setMsg(''), 3000)

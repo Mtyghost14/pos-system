@@ -10,3 +10,4 @@ release/
 # TypeScript incremental build info
 *.tsbuildinfo
 test-cloud.mjs
+test-sync.mjs
