@@ -1510,19 +1510,16 @@ function generateCFDIXml(data: any): string {
 </cfdi:Comprobante>`
 }
 
-// Cierre común de ticket para impresora térmica (TSP100 y compatibles).
-// 1) Avanza papel con LF (0x0A) — el salto de línea funciona igual en modo
-//    ESC/POS y en modo Star Line, así la última línea sale más allá de la cuchilla.
-// 2) Pre-corte (corte parcial) enviado en los DOS dialectos; la impresora
-//    ejecuta el que corresponde a su modo e ignora el otro:
-//      · GS V 1   (1D 56 01) → corte parcial ESC/POS
-//      · ESC d 3  (1B 64 03) → corte parcial Star Line Mode (avanza a la cuchilla y corta)
+// Cierre común de ticket para impresora térmica (Star TSP100 en modo Star Line).
+// Avanza unas líneas de holgura y hace PRE-CORTE (corte parcial) con `ESC d 3`
+// (1B 64 03): avanza a la posición de la cuchilla y corta.
+// NO se envía el comando ESC/POS `GS V` porque esta impresora no lo interpreta
+// y lo imprime como una "V" al inicio del siguiente ticket.
 function ticketEnd(): Buffer {
-  const ESC = 0x1b, GS = 0x1d, LF = 0x0a
+  const ESC = 0x1b, LF = 0x0a
   return Buffer.from([
-    LF, LF, LF, LF, LF, LF, LF, LF,  // 8 líneas de holgura para que no se recorte el final
-    GS, 0x56, 0x01,                  // pre-corte (ESC/POS, corte parcial)
-    ESC, 0x64, 0x03,                 // pre-corte (Star Line Mode, corte parcial)
+    LF, LF, LF, LF,   // holgura para que no se recorte el final
+    ESC, 0x64, 0x03,  // pre-corte (corte parcial Star Line Mode)
   ])
 }
 
