@@ -1510,6 +1510,22 @@ function generateCFDIXml(data: any): string {
 </cfdi:Comprobante>`
 }
 
+// Cierre común de ticket para impresora térmica (TSP100 y compatibles).
+// 1) Avanza papel con LF (0x0A) — el salto de línea funciona igual en modo
+//    ESC/POS y en modo Star Line, así la última línea sale más allá de la cuchilla.
+// 2) Pre-corte (corte parcial) enviado en los DOS dialectos; la impresora
+//    ejecuta el que corresponde a su modo e ignora el otro:
+//      · GS V 1   (1D 56 01) → corte parcial ESC/POS
+//      · ESC d 3  (1B 64 03) → corte parcial Star Line Mode (avanza a la cuchilla y corta)
+function ticketEnd(): Buffer {
+  const ESC = 0x1b, GS = 0x1d, LF = 0x0a
+  return Buffer.from([
+    LF, LF, LF, LF, LF, LF, LF, LF,  // 8 líneas de holgura para que no se recorte el final
+    GS, 0x56, 0x01,                  // pre-corte (ESC/POS, corte parcial)
+    ESC, 0x64, 0x03,                 // pre-corte (Star Line Mode, corte parcial)
+  ])
+}
+
 function buildReceiptESCPOS(data: any): Buffer {
   const fmt  = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
   const norm = (s: string)  => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?')
@@ -1575,8 +1591,7 @@ function buildReceiptESCPOS(data: any): Buffer {
   raw(ESC, 0x61, 0x01)
   line(data.footer || data.receipt_footer || 'Gracias por su compra!')
 
-  raw(ESC, 0x64, 4)             // feed 4 lines
-  raw(GS, 0x56, 0x00)          // full cut
+  parts.push(ticketEnd())      // avance de papel + pre-corte (corte parcial)
 
   return Buffer.concat(parts)
 }
@@ -1642,7 +1657,7 @@ function buildReceiptHTML(data: any): string {
   .total-row { font-size: ${fontTotal}px; font-weight: 900; display: flex; justify-content: space-between; padding: 3px 0; }
   @media print {
     @page { margin: 0; }
-    body { padding: 2mm; }
+    body { padding: 2mm 2mm 40mm; }
   }
 </style>
 </head>
@@ -1663,6 +1678,7 @@ function buildReceiptHTML(data: any): string {
   ${changeRow}
   <div class="divider"></div>
   <div style="text-align:center;font-size:${fontMeta}px;margin-top:3px">${data.footer || data.receipt_footer || '¡Gracias por su compra!'}</div>
+  <div style="height:40mm"></div>
 </body>
 </html>`
 }
@@ -1801,7 +1817,7 @@ function buildShiftESCPOS(data: any): Buffer {
 
   raw(LF); div()
   raw(ESC, 0x61, 0x01); line(data.endedAt || new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
-  raw(ESC, 0x64, 14, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
+  parts.push(ticketEnd())  // avance de papel + pre-corte (corte parcial)
   return Buffer.concat(parts)
 }
 
@@ -1859,7 +1875,7 @@ function buildShiftOpenESCPOS(data: any): Buffer {
 
   raw(LF); div()
   raw(ESC, 0x61, 0x01); line(data.startedAt || new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
-  raw(ESC, 0x64, 14, GS, 0x56, 0x00)  // feed + full cut
+  parts.push(ticketEnd())  // avance de papel + pre-corte (corte parcial)
   return Buffer.concat(parts)
 }
 
@@ -1946,7 +1962,7 @@ function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
 
   raw(LF); div()
   raw(ESC, 0x61, 0x01); line(new Date().toLocaleString('es-MX')); raw(ESC, 0x61, 0x00)
-  raw(ESC, 0x64, 14, GS, 0x56, 0x00)  // feed + full cut (extra feed so nothing gets cut off)
+  parts.push(ticketEnd())  // avance de papel + pre-corte (corte parcial)
   return Buffer.concat(parts)
 }
 
