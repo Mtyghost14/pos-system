@@ -271,6 +271,14 @@ begin
     return;                       -- ya sincronizada (reintento idempotente)
   end if;
 
+  -- El encabezado va primero: sale_items_mirror.folio referencia a sales_mirror.folio
+  insert into public.sales_mirror
+    (folio, pos_sale_id, cashier_name, payment_type, total, cost_total, sold_at)
+  values
+    (v_folio, (p_sale->>'pos_sale_id')::int, p_sale->>'cashier_name', p_sale->>'payment_type',
+     (p_sale->>'total')::numeric, coalesce((p_sale->>'cost_total')::numeric,0),
+     coalesce((p_sale->>'sold_at')::timestamptz, now()));
+
   for it in select * from jsonb_array_elements(coalesce(p_sale->'items','[]'::jsonb))
   loop
     select id, stock into v_pid, v_before from public.products
@@ -294,13 +302,6 @@ begin
     values (v_folio, it->>'code', it->>'name', (it->>'qty')::numeric,
             (it->>'unit_price')::numeric, coalesce((it->>'discount')::numeric,0));
   end loop;
-
-  insert into public.sales_mirror
-    (folio, pos_sale_id, cashier_name, payment_type, total, cost_total, sold_at)
-  values
-    (v_folio, (p_sale->>'pos_sale_id')::int, p_sale->>'cashier_name', p_sale->>'payment_type',
-     (p_sale->>'total')::numeric, coalesce((p_sale->>'cost_total')::numeric,0),
-     coalesce((p_sale->>'sold_at')::timestamptz, now()));
 end $$;
 
 -- Cancelar una venta: regresa el stock y marca el espejo.
@@ -371,18 +372,30 @@ grant execute on function
   to authenticated;
 
 -- ─── Realtime: el POS y el portal se suscriben a estos cambios ──────────────
+-- (idempotente: ignora si la tabla ya está en la publicación)
 do $$
+declare t text;
 begin
-  alter publication supabase_realtime add table public.products;
-exception when duplicate_object then null; end $$;
-do $$
-begin
-  alter publication supabase_realtime add table public.inventory_movements;
-exception when duplicate_object then null; end $$;
-do $$
-begin
-  alter publication supabase_realtime add table public.sales_mirror;
-exception when duplicate_object then null; end $$;
+  foreach t in array array['products','inventory_movements','sales_mirror'] loop
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
+    ) then
+      execute format('alter publication supabase_realtime add table public.%I', t);
+    end if;
+  end loop;
+end $$;
+
+-- ─── Backfill de profiles ──────────────────────────────────────────────────
+-- Por si algún usuario se creó en Authentication ANTES de que existiera el
+-- trigger on_auth_user_created. Idempotente.
+insert into public.profiles (id, username, name, role)
+select u.id, split_part(u.email, '@', 1), split_part(u.email, '@', 1), 'empleado'
+from auth.users u
+on conflict (id) do nothing;
+
+update public.profiles set role = 'terminal' where username = 'terminal';
+update public.profiles set role = 'admin'    where username = 'admin';
 
 -- ─── Refrescar el cache de PostgREST ───────────────────────────────────────
 notify pgrst, 'reload schema';
