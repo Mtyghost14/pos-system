@@ -11,3 +11,4 @@ release/
 *.tsbuildinfo
 test-cloud.mjs
 test-sync.mjs
+crear-empleados.mjs

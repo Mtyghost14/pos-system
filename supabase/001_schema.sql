@@ -134,7 +134,9 @@ returns text language sql stable as $$
 $$;
 
 create or replace function public._is_admin()
-returns boolean language sql stable as $$
+returns boolean language sql stable security definer set search_path = public as $$
+  -- security definer: evita recursión infinita (esta función se llama desde la
+  -- política RLS de profiles, que si no la re-dispararía).
   select coalesce((select role in ('admin','terminal') from public.profiles where id = auth.uid()), false);
 $$;
 
