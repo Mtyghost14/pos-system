@@ -97,6 +97,7 @@ function CashCounterModal({ onConfirm, onClose }: { onConfirm: (total: number) =
 const navItems = [
   { path: '/ventas', label: 'Ventas', icon: '🛒', roles: ['admin', 'cajero'] },
   { path: '/corte', label: 'Corte', icon: '💰', roles: ['admin', 'cajero'] },
+  { path: '/pedidos', label: 'Pedidos', icon: '🎈', roles: ['admin', 'cajero'] },
   { path: '/productos', label: 'Productos', icon: '📦', roles: ['admin', 'cajero'] },
   { path: '/inventario', label: 'Inventario', icon: '📋', roles: ['admin', 'cajero'] },
   { path: '/compras', label: 'Compras', icon: '🚚', roles: ['admin'] },

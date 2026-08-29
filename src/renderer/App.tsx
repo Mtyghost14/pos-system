@@ -12,6 +12,7 @@ import Invoices from './pages/Invoices'
 import Corte from './pages/Corte'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
+import Pedidos from './pages/Pedidos'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore(s => s.user)
@@ -202,6 +203,7 @@ export default function App() {
           <Route path="compras" element={<RequireAdmin><Purchases /></RequireAdmin>} />
           <Route path="facturas" element={<RequireAdmin><Invoices /></RequireAdmin>} />
           <Route path="corte" element={<Corte />} />
+          <Route path="pedidos" element={<Pedidos />} />
           <Route path="reportes" element={<RequireAdmin><Reports /></RequireAdmin>} />
           <Route path="configuracion" element={<RequireAdmin><Settings /></RequireAdmin>} />
         </Route>

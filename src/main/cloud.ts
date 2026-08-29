@@ -179,6 +179,60 @@ function registerCloudHandlers() {
 
   ipcMain.handle('cloud:syncNow', () => syncCatalogToLocal())
 
+  // ─── Pedidos de globos (calendario) — proxy al cliente de la nube ──────────
+  const needCloud = () => { if (!ready || !client) throw new Error('Sin conexión con la nube') }
+  const wrap = async (fn: () => Promise<any>) => {
+    try { needCloud(); return { ok: true, data: await fn() } }
+    catch (e: any) { return { ok: false, message: e?.message || 'Error' } }
+  }
+
+  ipcMain.handle('orders:list', (_e, from: string, to: string) => wrap(async () => {
+    const { data, error } = await client!.from('balloon_orders')
+      .select('*, balloon_order_items(*)')
+      .gte('fecha_hora', from).lte('fecha_hora', to)
+      .order('fecha_hora')
+    if (error) throw new Error(error.message)
+    return data
+  }))
+
+  ipcMain.handle('orders:get', (_e, id: number) => wrap(async () => {
+    const { data, error } = await client!.from('balloon_orders')
+      .select('*, balloon_order_items(*)').eq('id', id).maybeSingle()
+    if (error) throw new Error(error.message)
+    return data
+  }))
+
+  ipcMain.handle('orders:catalog', () => wrap(async () => {
+    const { data, error } = await client!.from('order_catalog')
+      .select('id,categoria,nombre,precio').eq('activo', true).order('orden')
+    if (error) throw new Error(error.message)
+    return data
+  }))
+
+  ipcMain.handle('orders:datosPago', () => wrap(async () => {
+    const { data, error } = await client!.from('app_settings').select('value').eq('key', 'datos_pago').maybeSingle()
+    if (error) throw new Error(error.message)
+    return data?.value ?? ''
+  }))
+
+  ipcMain.handle('orders:save', (_e, payload: any) => wrap(async () => {
+    const { data, error } = await client!.rpc('order_save', { p: payload })
+    if (error) throw new Error(error.message)
+    return data
+  }))
+
+  ipcMain.handle('orders:setEstado', (_e, id: number, estado: string) => wrap(async () => {
+    const { error } = await client!.rpc('order_set_estado', { p_id: id, p_estado: estado })
+    if (error) throw new Error(error.message)
+    return true
+  }))
+
+  ipcMain.handle('orders:delete', (_e, id: number) => wrap(async () => {
+    const { error } = await client!.rpc('order_delete', { p_id: id })
+    if (error) throw new Error(error.message)
+    return true
+  }))
+
   // Guarda credenciales y reconecta; devuelve un conteo de productos como prueba real.
   ipcMain.handle('cloud:test', async () => {
     const r = await reloadCloud()
