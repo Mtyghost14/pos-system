@@ -410,6 +410,9 @@ export function registerIpcHandlers() {
       await cloudRpc('commit_pos_sale', { p_sale: {
         folio, pos_sale_id: null, cashier_name: cashierName, payment_type: effectiveType,
         total: data.total, cost_total: costTotal, sold_at: new Date().toISOString(),
+        received_amount: data.received_amount ?? data.total,
+        change_amount: data.change_amount ?? 0,
+        payment_details: hasMixed ? paymentDetails : null,
         items: items.map((i: any) => ({
           code: i.code, name: i.name, qty: i.qty,
           unit_price: i.unit_price, unit_cost: i.unit_cost, discount: i.discount,

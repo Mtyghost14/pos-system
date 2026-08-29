@@ -12,3 +12,5 @@ release/
 test-cloud.mjs
 test-sync.mjs
 crear-empleados.mjs
+reset-empleados.mjs
+confirmar-empleados.mjs

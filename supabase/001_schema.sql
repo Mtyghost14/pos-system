@@ -301,11 +301,15 @@ begin
 
   -- El encabezado va primero: sale_items_mirror.folio referencia a sales_mirror.folio
   insert into public.sales_mirror
-    (folio, pos_sale_id, cashier_name, payment_type, total, cost_total, sold_at)
+    (folio, pos_sale_id, cashier_name, payment_type, total, cost_total, sold_at,
+     received_amount, change_amount, payment_details)
   values
     (v_folio, (p_sale->>'pos_sale_id')::int, p_sale->>'cashier_name', p_sale->>'payment_type',
      (p_sale->>'total')::numeric, coalesce((p_sale->>'cost_total')::numeric,0),
-     coalesce((p_sale->>'sold_at')::timestamptz, now()));
+     coalesce((p_sale->>'sold_at')::timestamptz, now()),
+     nullif(p_sale->>'received_amount','')::numeric,
+     nullif(p_sale->>'change_amount','')::numeric,
+     case when jsonb_typeof(p_sale->'payment_details') = 'object' then p_sale->'payment_details' else null end);
 
   for it in select * from jsonb_array_elements(coalesce(p_sale->'items','[]'::jsonb))
   loop
