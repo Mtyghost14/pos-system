@@ -707,7 +707,7 @@ export function registerIpcHandlers() {
       SELECT COALESCE(SUM(total),0) as sales, COALESCE(SUM(total-cost_total),0) as profit,
              COUNT(*) as transactions, COALESCE(AVG(total),0) as avg_ticket,
              COALESCE(SUM(total-cost_total)/NULLIF(SUM(total),0)*100,0) as margin
-      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ? AND (cancelled IS NULL OR cancelled = 0)
     `).get(from, to) as any
 
     const today    = dayKpis(todayStr, todayStr)
@@ -721,7 +721,7 @@ export function registerIpcHandlers() {
              COALESCE(SUM(total-cost_total),0) as profit,
              COUNT(*) as transactions
       FROM sales
-      WHERE DATE(timestamp,'localtime') >= DATE('now','localtime','-29 days')
+      WHERE DATE(timestamp,'localtime') >= DATE('now','localtime','-29 days') AND (cancelled IS NULL OR cancelled = 0)
       GROUP BY DATE(timestamp,'localtime') ORDER BY date
     `).all()
 
@@ -739,7 +739,7 @@ export function registerIpcHandlers() {
       FROM sale_items si
       JOIN sales s ON si.sale_id=s.id
       JOIN products p ON si.product_id=p.id
-      WHERE DATE(s.timestamp,'localtime')=?
+      WHERE DATE(s.timestamp,'localtime')=? AND (s.cancelled IS NULL OR s.cancelled = 0)
       GROUP BY p.id ORDER BY revenue DESC LIMIT 8
     `).all(todayStr)
 
@@ -763,7 +763,7 @@ export function registerIpcHandlers() {
       SELECT CAST(strftime('%w', timestamp, 'localtime') AS INTEGER) as dow,
              COALESCE(SUM(total),0) as total, COUNT(*) as count
       FROM sales
-      WHERE DATE(timestamp,'localtime') >= DATE('now','localtime','-90 days')
+      WHERE DATE(timestamp,'localtime') >= DATE('now','localtime','-90 days') AND (cancelled IS NULL OR cancelled = 0)
       GROUP BY dow ORDER BY dow
     `).all()
     const DOW_LABELS = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']
@@ -802,18 +802,18 @@ export function registerIpcHandlers() {
         COALESCE(SUM(total - cost_total),0) as total_profit,
         COALESCE(AVG(total),0) as avg_ticket,
         COALESCE(AVG(CASE WHEN total > 0 THEN (total - cost_total)/total * 100 ELSE 0 END),0) as avg_margin
-      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ? AND (cancelled IS NULL OR cancelled = 0)
     `).get(from, to) as any
 
     const byDay = db.prepare(`
       SELECT DATE(timestamp,'localtime') as date, SUM(total) as total, SUM(total - cost_total) as profit
-      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ? AND (cancelled IS NULL OR cancelled = 0)
       GROUP BY DATE(timestamp,'localtime') ORDER BY date
     `).all(from, to)
 
     const byPayment = db.prepare(`
       SELECT payment_type, SUM(total) as total, COUNT(*) as count
-      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ? AND (cancelled IS NULL OR cancelled = 0)
       GROUP BY payment_type
     `).all(from, to)
 
@@ -839,7 +839,7 @@ export function registerIpcHandlers() {
       JOIN sales s ON si.sale_id = s.id
       JOIN products p ON si.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE DATE(s.timestamp,'localtime') BETWEEN ? AND ?
+      WHERE DATE(s.timestamp,'localtime') BETWEEN ? AND ? AND (s.cancelled IS NULL OR s.cancelled = 0)
       GROUP BY p.id ORDER BY total_revenue DESC LIMIT 10
     `).all(from, to)
 
@@ -853,13 +853,13 @@ export function registerIpcHandlers() {
       JOIN sales s ON si.sale_id = s.id
       JOIN products p ON si.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE DATE(s.timestamp,'localtime') BETWEEN ? AND ?
+      WHERE DATE(s.timestamp,'localtime') BETWEEN ? AND ? AND (s.cancelled IS NULL OR s.cancelled = 0)
       GROUP BY p.id ORDER BY total_profit DESC LIMIT 10
     `).all(from, to)
 
     const byHour = db.prepare(`
       SELECT CAST(strftime('%H', timestamp, 'localtime') AS INTEGER) as hour, SUM(total) as total, COUNT(*) as count
-      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ?
+      FROM sales WHERE DATE(timestamp,'localtime') BETWEEN ? AND ? AND (cancelled IS NULL OR cancelled = 0)
       GROUP BY hour ORDER BY hour
     `).all(from, to)
 
@@ -955,7 +955,7 @@ export function registerIpcHandlers() {
       JOIN products p ON si.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
       LEFT JOIN users u ON s.cashier_id = u.id
-      WHERE 1=1
+      WHERE (s.cancelled IS NULL OR s.cancelled = 0)
     `
     const params: any[] = []
     if (filters?.from) { query += " AND DATE(s.timestamp,'localtime') >= ?"; params.push(filters.from) }
