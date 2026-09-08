@@ -134,6 +134,8 @@ const api = {
   cloudMigrateCatalog: (): Promise<{ ok: boolean; message?: string; uploaded?: number; skipped?: number; barcodesUploaded?: number; total?: number; errors?: string[] }> =>
     ipcRenderer.invoke('cloud:migrateCatalog'),
   cloudSyncNow: (): Promise<{ ok: boolean; message?: string; products?: number }> => ipcRenderer.invoke('cloud:syncNow'),
+  cloudMigrateSales: (): Promise<{ ok: boolean; message?: string; uploaded?: number; skipped?: number; total?: number; errors?: string[] }> =>
+    ipcRenderer.invoke('cloud:migrateSales'),
 
   // Pedidos de globos (calendario, vive en la nube)
   ordersList: (from: string, to: string): Promise<{ ok: boolean; data?: any[]; message?: string }> => ipcRenderer.invoke('orders:list', from, to),

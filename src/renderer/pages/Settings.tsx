@@ -1106,6 +1106,9 @@ function SyncTab({ showMsg }: any) {
   const [migrating, setMigrating] = useState(false)
   const [migResult, setMigResult] = useState<any>(null)
   const [confirmMig, setConfirmMig] = useState(false)
+  const [migS, setMigS] = useState(false)
+  const [migSResult, setMigSResult] = useState<any>(null)
+  const [confirmMigS, setConfirmMigS] = useState(false)
   const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
 
   useEffect(() => {
@@ -1138,6 +1141,15 @@ function SyncTab({ showMsg }: any) {
     setMigrating(false)
     if (res.ok) showMsg(`Catálogo subido: ${res.uploaded} productos`)
     else showMsg('La subida terminó con errores', 'err')
+  }
+
+  const handleMigrateSales = async () => {
+    setConfirmMigS(false); setMigS(true); setMigSResult(null)
+    const res = await window.api.cloudMigrateSales()
+    setMigSResult(res)
+    setMigS(false)
+    if (res.ok) showMsg(`Ventas subidas: ${res.uploaded}`)
+    else showMsg('La subida de ventas terminó con errores', 'err')
   }
 
   const card: React.CSSProperties = { background: 'var(--nm-bg)', borderRadius: 18, boxShadow: 'var(--nm-raised)', padding: 20 }
@@ -1220,6 +1232,47 @@ function SyncTab({ showMsg }: any) {
           </div>
         )}
       </div>
+
+      {/* Migración de ventas históricas */}
+      <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 900, color: 'var(--nm-text)' }}>Subir ventas históricas a la nube</div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)', lineHeight: 1.5 }}>
+          Sube todas las ventas de este POS a la nube para poder sacar los reportes desde el portal web.
+          No modifica el inventario — solo copia las ventas. Solo sube lo que aún no esté; se puede repetir.
+        </div>
+        <button onClick={() => setConfirmMigS(true)} disabled={!status.ready || migS} className="nm-btn"
+          style={{ padding: '11px', fontSize: 13, fontWeight: 700, opacity: (!status.ready || migS) ? 0.5 : 1 }}>
+          {migS ? 'Subiendo ventas…' : '⬆️ Subir ventas'}
+        </button>
+        {migSResult && (
+          <div style={{ fontSize: 12, fontWeight: 700, color: migSResult.ok ? 'var(--nm-success)' : 'var(--nm-warning)', lineHeight: 1.6 }}>
+            {migSResult.message
+              ? `⚠️ ${migSResult.message}`
+              : `Subidas: ${migSResult.uploaded} · Ya existían: ${migSResult.skipped} (de ${migSResult.total})`}
+            {migSResult.errors?.length > 0 && (
+              <div style={{ marginTop: 6, color: 'var(--nm-danger)', fontWeight: 600 }}>
+                {migSResult.errors.map((e: string, i: number) => <div key={i}>· {e}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {confirmMigS && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'var(--nm-bg)', borderRadius: 20, boxShadow: 'var(--nm-raised-lg)', padding: '28px', maxWidth: 380, width: '90%', textAlign: 'center' }}>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>⬆️</div>
+            <div style={{ fontSize: 15, fontWeight: 900, color: 'var(--nm-text)', marginBottom: 8 }}>¿Subir las ventas a la nube?</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)', marginBottom: 20, lineHeight: 1.5 }}>
+              Puede tardar un poco si hay muchas ventas. No borra ni cambia el inventario ni las ventas que ya estén en la nube.
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setConfirmMigS(false)} className="nm-btn" style={{ flex: 1, padding: '11px', fontSize: 13 }}>Cancelar</button>
+              <button onClick={handleMigrateSales} className="nm-btn-accent" style={{ flex: 1, padding: '11px', fontSize: 13 }}>Subir</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirmMig && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>

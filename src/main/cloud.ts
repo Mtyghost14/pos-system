@@ -302,4 +302,80 @@ function registerCloudHandlers() {
       errors: errors.slice(0, 25),
     }
   })
+
+  // Migración única: sube las ventas históricas del POS al espejo de la nube
+  // (sales_mirror / sale_items_mirror) para poder sacar reportes desde el portal.
+  // NO descuenta stock ni genera movimientos — son ventas ya ocurridas.
+  // Idempotente por folio: se puede repetir sin duplicar.
+  ipcMain.handle('cloud:migrateSales', async () => {
+    if (!ready || !client) {
+      const r = await reloadCloud()
+      if (!r.ok) return { ok: false, message: r.message }
+    }
+    const db = getDb()
+
+    // Folios que ya están en la nube (paginado).
+    const existing = new Set<string>()
+    const pageSize = 1000
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await client!.from('sales_mirror')
+        .select('folio').range(offset, offset + pageSize - 1)
+      if (error) return { ok: false, message: `No se pudo leer la nube: ${error.message}` }
+      for (const r of data as any[]) existing.add(r.folio)
+      if (!data || data.length < pageSize) break
+    }
+
+    const sales = db.prepare(`
+      SELECT s.id, s.folio, s.payment_type, s.total, s.cost_total, s.timestamp,
+             COALESCE(s.cancelled, 0) AS cancelled,
+             s.received_amount, s.change_amount, s.payment_details,
+             u.name AS cashier_name
+      FROM sales s LEFT JOIN users u ON s.cashier_id = u.id
+      ORDER BY s.id
+    `).all() as any[]
+
+    const itemsBySale = new Map<number, any[]>()
+    for (const it of db.prepare(`
+      SELECT si.sale_id,
+             COALESCE(si.product_code, p.code) AS code,
+             COALESCE(si.product_name, p.name) AS name,
+             si.quantity AS qty, si.unit_price, si.discount
+      FROM sale_items si LEFT JOIN products p ON si.product_id = p.id
+    `).all() as any[]) {
+      if (!itemsBySale.has(it.sale_id)) itemsBySale.set(it.sale_id, [])
+      itemsBySale.get(it.sale_id)!.push({
+        code: it.code, name: it.name, qty: it.qty,
+        unit_price: it.unit_price, discount: it.discount ?? 0,
+      })
+    }
+
+    const pending = sales.filter(s => !existing.has(s.folio))
+    let uploaded = 0
+    const errors: string[] = []
+    const CHUNK = 200
+    for (let i = 0; i < pending.length; i += CHUNK) {
+      const batch = pending.slice(i, i + CHUNK).map(s => {
+        let pd: any = null
+        if (s.payment_details) { try { pd = JSON.parse(s.payment_details) } catch { /* ignore */ } }
+        return {
+          folio: s.folio, pos_sale_id: s.id, cashier_name: s.cashier_name ?? null,
+          payment_type: s.payment_type, total: s.total, cost_total: s.cost_total ?? 0,
+          cancelled: !!s.cancelled, sold_at: s.timestamp,
+          received_amount: s.received_amount ?? '', change_amount: s.change_amount ?? '',
+          payment_details: pd, items: itemsBySale.get(s.id) ?? [],
+        }
+      })
+      const { data, error } = await client!.rpc('import_pos_sales_bulk', { p: batch })
+      if (error) errors.push(error.message)
+      else uploaded += (data as number) ?? 0
+    }
+
+    return {
+      ok: errors.length === 0,
+      uploaded,
+      skipped: sales.length - pending.length,
+      total: sales.length,
+      errors: errors.slice(0, 10),
+    }
+  })
 }
