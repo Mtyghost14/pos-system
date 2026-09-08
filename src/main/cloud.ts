@@ -303,6 +303,20 @@ function registerCloudHandlers() {
     }
   })
 
+  // ¿Cuántas ventas locales aún no están en la nube? (aproximado, para avisar)
+  ipcMain.handle('cloud:salesStatus', async () => {
+    try {
+      if (!ready || !client) return { ok: false, message: 'Sin conexión con la nube' }
+      const local = (getDb().prepare('SELECT COUNT(*) AS c FROM sales').get() as any).c as number
+      const { count, error } = await client.from('sales_mirror').select('*', { count: 'exact', head: true })
+      if (error) return { ok: false, message: error.message }
+      const cloud = count ?? 0
+      return { ok: true, local, cloud, pending: Math.max(0, local - cloud) }
+    } catch (e: any) {
+      return { ok: false, message: e?.message || 'Error' }
+    }
+  })
+
   // Migración única: sube las ventas históricas del POS al espejo de la nube
   // (sales_mirror / sale_items_mirror) para poder sacar reportes desde el portal.
   // NO descuenta stock ni genera movimientos — son ventas ya ocurridas.

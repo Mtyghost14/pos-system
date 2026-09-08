@@ -181,6 +181,73 @@ function CloudBanner() {
   )
 }
 
+function HistoricSalesBanner() {
+  const [pending, setPending] = useState(0)
+  const [state, setState] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle')
+  const [msg, setMsg] = useState('')
+  const [dismissed, setDismissed] = useState(false)
+
+  const check = async () => {
+    try {
+      const s = await window.api.cloudSalesStatus()
+      if (s.ok) setPending(s.pending || 0)
+    } catch { /* ignore */ }
+  }
+
+  useEffect(() => {
+    check()
+    const iv = setInterval(check, 60000)
+    return () => clearInterval(iv)
+  }, [])
+
+  if (dismissed || state === 'done' || pending <= 0) return null
+
+  const upload = async () => {
+    setState('uploading'); setMsg('')
+    const r = await window.api.cloudMigrateSales()
+    if (r.ok) {
+      setMsg(`Listo — ${r.uploaded ?? 0} ventas subidas`)
+      setState('done')
+    } else {
+      setMsg(r.message || 'Terminó con errores. Puedes intentar de nuevo.')
+      setState('error')
+      check()
+    }
+  }
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9996,
+      background: state === 'error' ? '#b3261e' : '#0969da', color: '#fff',
+      padding: '8px 16px', display: 'flex', alignItems: 'center', gap: 12,
+      fontSize: 13, fontWeight: 700, boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
+    }}>
+      <span style={{ flex: 1 }}>
+        ☁️ Hay {pending.toLocaleString('es-MX')} ventas que aún no están en la nube.
+        {state === 'uploading'
+          ? ' Subiendo… puede tardar varios minutos — no cierres el programa.'
+          : state === 'error'
+            ? ` ${msg}`
+            : ' Súbelas para poder verlas en los reportes del portal.'}
+      </span>
+      {state !== 'uploading' && (
+        <button onClick={upload} style={{
+          background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
+          borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontWeight: 800, fontSize: 12,
+        }}>
+          Subir ahora
+        </button>
+      )}
+      {state !== 'uploading' && (
+        <button onClick={() => setDismissed(true)} style={{
+          background: 'none', border: 'none', color: 'rgba(255,255,255,0.7)',
+          cursor: 'pointer', fontSize: 16, padding: 0,
+        }}>×</button>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const { loadSettings } = useSettingsStore()
 
