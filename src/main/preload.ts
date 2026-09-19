@@ -39,6 +39,7 @@ const api = {
 
   // Shifts
   getActiveShift: (cashierId: number) => ipcRenderer.invoke('shifts:getActive', cashierId),
+  getAnyOpenShift: () => ipcRenderer.invoke('shifts:getAnyOpen'),
   openShift: (data: any) => ipcRenderer.invoke('shifts:open', data),
   closeShift: (data: any) => ipcRenderer.invoke('shifts:close', data),
   getShiftSummary: (shiftId: number) => ipcRenderer.invoke('shifts:getSummary', shiftId),

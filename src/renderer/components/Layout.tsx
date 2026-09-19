@@ -118,15 +118,20 @@ export default function Layout() {
   // apagón) se recupera el turno abierto de este cajero en vez de pedir el efectivo inicial otra vez.
   const [shiftChecked, setShiftChecked] = useState(false)
   const [restoredShift, setRestoredShift] = useState<any>(null)
+  const [otherShift, setOtherShift] = useState<any>(null) // turno abierto de OTRA persona: no se puede abrir uno nuevo
 
   useEffect(() => {
     if (!user) return
     if (shift) { setShiftChecked(true); return }
     let alive = true
     window.api.getActiveShift(user.id)
-      .then((sh: any) => {
+      .then(async (sh: any) => {
         if (!alive) return
         if (sh) { setShift(sh); setRestoredShift(sh) }
+        else {
+          const any = await window.api.getAnyOpenShift()
+          if (alive && any) setOtherShift(any)
+        }
         setShiftChecked(true)
       })
       .catch(() => { if (alive) setShiftChecked(true) })
@@ -152,6 +157,7 @@ export default function Layout() {
     setOpeningError('')
     const opening = parseFloat(openingCash)
     const res = await window.api.openShift({ cashier_id: user.id, opening_cash: opening })
+    if (res.blocked) { setOtherShift(res.openShift); return }
     if (res.success) {
       const sh = await window.api.getActiveShift(user.id)
       setShift(sh)
@@ -350,6 +356,43 @@ export default function Layout() {
               💰
             </div>
 
+            {otherShift ? (
+              <>
+                <h2 style={{ margin: '0 0 6px', fontSize: 22, fontWeight: 800, color: 'var(--nm-text)', textAlign: 'center', letterSpacing: '-0.02em' }}>
+                  Ya hay un turno abierto
+                </h2>
+                <p style={{ margin: '0 0 18px', fontSize: 13, fontWeight: 500, color: 'var(--nm-text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
+                  No se puede abrir otro turno mientras haya uno sin cerrar. Continúa con ese turno y haz su corte cuando termines.
+                </p>
+                <div style={{
+                  width: '100%', marginBottom: 18, background: 'var(--nm-bg)', borderRadius: 12,
+                  border: '1px solid var(--nm-separator)', padding: '12px 14px', fontSize: 13, color: 'var(--nm-text)', lineHeight: 1.6,
+                }}>
+                  <div><b>Turno #{otherShift.id}</b> · {otherShift.cashier_name || 'otro usuario'}</div>
+                  <div style={{ fontSize: 12, color: 'var(--nm-text-muted)' }}>
+                    Abierto: {otherShift.started_at} · Fondo inicial: ${Number(otherShift.opening_cash || 0).toFixed(2)}
+                  </div>
+                </div>
+                <button
+                  onClick={() => { setShift(otherShift); setOtherShift(null) }}
+                  className="nm-btn-accent"
+                  style={{ width: '100%', padding: '15px', fontSize: 16 }}
+                >
+                  Continuar con el Turno #{otherShift.id} →
+                </button>
+                <button
+                  onClick={handleLogout}
+                  style={{
+                    marginTop: 14, background: 'none', border: 'none', cursor: 'pointer',
+                    fontSize: 12, fontWeight: 600, color: 'var(--nm-text-light)',
+                    fontFamily: '-apple-system, SF Pro Text, Inter, sans-serif',
+                  }}
+                >
+                  Cancelar y cerrar sesión
+                </button>
+              </>
+            ) : (
+              <>
             <h2 style={{ margin: '0 0 6px', fontSize: 22, fontWeight: 800, color: 'var(--nm-text)', textAlign: 'center', letterSpacing: '-0.02em' }}>
               Apertura de Turno
             </h2>
@@ -420,6 +463,8 @@ export default function Layout() {
             >
               Cancelar y cerrar sesión
             </button>
+              </>
+            )}
           </div>
 
           {showCashCounter && (

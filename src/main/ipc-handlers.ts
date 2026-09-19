@@ -264,14 +264,29 @@ export function registerIpcHandlers() {
     return db.prepare("SELECT * FROM shifts WHERE cashier_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(cashierId)
   })
 
+  // Solo puede haber UN turno abierto a la vez (la caja es una). Se cierra únicamente con el corte.
+  const openShiftsSql = `SELECT s.*, u.name AS cashier_name FROM shifts s LEFT JOIN users u ON s.cashier_id = u.id
+                         WHERE s.status = 'open' ORDER BY s.id`
+
   ipcMain.handle('shifts:open', (_, data: any) => {
-    // Un turno solo se cierra con el corte. Si este cajero ya tiene uno abierto (p. ej. se fue la luz
-    // y volvió a entrar) NO se cierra ni se duplica: se reutiliza, sin tocar su fondo inicial.
-    const existing = db.prepare("SELECT id FROM shifts WHERE cashier_id=? AND status='open' ORDER BY id DESC LIMIT 1").get(data.cashier_id) as any
-    if (existing) return { success: true, id: existing.id, existing: true }
+    const open = db.prepare(openShiftsSql).all() as any[]
+    // Si este cajero ya tiene el turno abierto (p. ej. se fue la luz y volvió a entrar) se reutiliza, sin tocar su fondo.
+    const mine = open.filter(s => s.cashier_id === data.cashier_id).pop()
+    if (mine) return { success: true, id: mine.id, existing: true }
+    // Si hay un turno abierto de otra persona NO se abre otro: hay que hacer primero su corte.
+    if (open.length > 0) {
+      const o = open[0]
+      return {
+        success: false, blocked: true, openShift: o,
+        message: `Ya hay un turno abierto (#${o.id}, de ${o.cashier_name || 'otro usuario'}). Hay que hacer su corte antes de abrir otro.`,
+      }
+    }
     const res = db.prepare('INSERT INTO shifts (cashier_id, opening_cash) VALUES (?,?)').run(data.cashier_id, data.opening_cash)
     return { success: true, id: res.lastInsertRowid }
   })
+
+  // El turno abierto de cualquier cajero (el más antiguo primero), para avisar/continuarlo.
+  ipcMain.handle('shifts:getAnyOpen', () => db.prepare(openShiftsSql + ' LIMIT 1').get())
 
   ipcMain.handle('shifts:close', (_, data: any) => {
     const summary = getShiftSummaryData(data.shift_id)
