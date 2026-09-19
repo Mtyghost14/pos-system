@@ -233,6 +233,22 @@ function registerCloudHandlers() {
     return true
   }))
 
+  // ─── Listas de etiquetas enviadas desde el portal ──────────────────────────
+  ipcMain.handle('labels:listPending', () => wrap(async () => {
+    const { data, error } = await client!.from('label_lists')
+      .select('id,source,created_by,created_at,label_list_items(code,name,price,qty)')
+      .eq('status', 'pendiente')
+      .order('id')
+    if (error) throw new Error(error.message)
+    return data
+  }))
+
+  ipcMain.handle('labels:setStatus', (_e, id: number, status: string) => wrap(async () => {
+    const { error } = await client!.rpc('label_list_set_status', { p_id: id, p_status: status })
+    if (error) throw new Error(error.message)
+    return true
+  }))
+
   // Guarda credenciales y reconecta; devuelve un conteo de productos como prueba real.
   ipcMain.handle('cloud:test', async () => {
     const r = await reloadCloud()

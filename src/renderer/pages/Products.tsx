@@ -22,6 +22,20 @@ export default function Products() {
   const [loading, setLoading] = useState(false)
   const [msg, setMsg] = useState('')
   const [msgType, setMsgType] = useState<'ok' | 'err'>('ok')
+  const [labelLists, setLabelLists] = useState<any[]>([])
+
+  // Listas de etiquetas enviadas desde el portal (Recibir mercancía → Enviar a etiquetas)
+  const loadLabelLists = async () => {
+    try {
+      const r = await (window.api as any).labelsPending()
+      if (r?.ok) setLabelLists(r.data || [])
+    } catch { /* sin conexión: no hay avisos */ }
+  }
+  useEffect(() => {
+    loadLabelLists()
+    const iv = setInterval(loadLabelLists, 30000)
+    return () => clearInterval(iv)
+  }, [])
 
   useEffect(() => { loadCategories(); loadProducts() }, [])
 
@@ -58,7 +72,7 @@ export default function Products() {
     { id: 'promociones', label: 'Promociones' },
     { id: 'importar', label: 'Importar' },
     { id: 'exportar', label: 'Exportar' },
-    { id: 'etiquetas', label: 'Etiquetas' },
+    { id: 'etiquetas', label: labelLists.length ? `Etiquetas (${labelLists.length})` : 'Etiquetas' },
   ]
   const tabs = isAdmin ? allTabs : allTabs.filter(t => CASHIER_TABS.includes(t.id))
 
@@ -80,7 +94,7 @@ export default function Products() {
       {tab === 'promociones' && <PromotionsTab products={products} />}
       {tab === 'importar' && <ImportTab reload={loadProducts} showMsg={showMsg} categories={categories} userName={user?.name} />}
       {tab === 'exportar' && <ExportTab products={products} />}
-      {tab === 'etiquetas' && <LabelsTab products={products} />}
+      {tab === 'etiquetas' && <LabelsTab products={products} lists={labelLists} onListsChanged={loadLabelLists} />}
     </PageShell>
   )
 }
@@ -1550,7 +1564,10 @@ function generateBarcodeSVG(code: string, height: number): string {
   }
 }
 
-function LabelsTab({ products: allProducts }: { products: Product[] }) {
+function LabelsTab({ products: allProducts, lists = [], onListsChanged = () => {} }: { products: Product[]; lists?: any[]; onListsChanged?: () => void }) {
+  const [bannerSize, setBannerSize] = useState<LabelSize | null>(null)   // hay que elegirlo explícitamente
+  const [busyList, setBusyList] = useState<number | null>(null)
+  const [listMsg, setListMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<Product[]>([])
   const [items, setItems] = useState<LabelItem[]>([])
@@ -1629,6 +1646,57 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
 
   const totalLabels = items.reduce((s, i) => s + i.qty, 0)
 
+  // ── Listas pendientes que llegan del portal ──
+  const listToItems = (l: any): LabelItem[] => (l.label_list_items || []).map((it: any, idx: number) => ({
+    // Solo se usan código, nombre y precio; el producto puede no existir todavía en este POS.
+    product: { id: -(l.id * 10000 + idx + 1), code: String(it.code), name: it.name, price: Number(it.price) || 0 } as any as Product,
+    code: String(it.code), label: it.name, qty: Number(it.qty) || 1,
+  }))
+  const listCount = (l: any) => (l.label_list_items || []).reduce((s: number, it: any) => s + (Number(it.qty) || 0), 0)
+
+  const printList = async (l: any) => {
+    if (!bannerSize) return
+    const fresh = await window.api.getSettings()
+    const printerName = (fresh?.label_printer || zebraPrinter || '').trim()
+    if (!printerName) { setListMsg({ ok: false, text: 'Configura la impresora Zebra en Configuración → Tickets y Etiquetas' }); return }
+    setBusyList(l.id); setListMsg(null)
+    const res = await (window.api as any).printZPL({ zpl: buildZPL(listToItems(l), bannerSize, labelSettings), printerName })
+    if (res.success) {
+      const st = await (window.api as any).labelsSetStatus(l.id, 'impresa')
+      setListMsg({ ok: true, text: `✓ ${listCount(l)} etiquetas enviadas a ${printerName}${st?.ok ? '' : ' (no se pudo marcar la lista como impresa: revisa la conexión)'}` })
+      onListsChanged()
+    } else {
+      setListMsg({ ok: false, text: res.message || 'Error al imprimir' })
+    }
+    setBusyList(null)
+  }
+
+  const loadList = async (l: any) => {
+    setBusyList(l.id)
+    const incoming = listToItems(l)
+    setItems(prev => {
+      const next = [...prev]
+      for (const it of incoming) {
+        const i = next.findIndex(x => x.code === it.code)
+        if (i >= 0) next[i] = { ...next[i], qty: next[i].qty + it.qty }
+        else next.push(it)
+      }
+      return next
+    })
+    if (bannerSize) setSize(bannerSize)
+    await (window.api as any).labelsSetStatus(l.id, 'cargada')
+    onListsChanged()
+    setBusyList(null)
+  }
+
+  const discardList = async (l: any) => {
+    if (!window.confirm('¿Descartar esta lista de etiquetas? No se imprimirá.')) return
+    setBusyList(l.id)
+    await (window.api as any).labelsSetStatus(l.id, 'descartada')
+    onListsChanged()
+    setBusyList(null)
+  }
+
   const handlePrint = async () => {
     // Always fetch fresh settings so a newly saved printer is picked up without page reload
     const freshSettings = await window.api.getSettings()
@@ -1666,6 +1734,81 @@ function LabelsTab({ products: allProducts }: { products: Product[] }) {
     <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', maxWidth: 860 }}>
       {/* Left: controls */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* Listas pendientes enviadas desde el portal */}
+        {lists.length > 0 && (
+          <div style={{ background: 'var(--nm-bg)', borderRadius: 16, boxShadow: 'var(--nm-raised)', padding: 16, border: '2px solid var(--nm-accent)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 900, color: 'var(--nm-text)' }}>
+              📨 {lists.length === 1 ? 'Hay una lista de etiquetas pendiente' : `Hay ${lists.length} listas de etiquetas pendientes`}
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--nm-text-muted)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                1. Elige el tamaño de etiqueta
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {(Object.keys(LABEL_SIZES) as LabelSize[]).map(k => (
+                  <button key={k} onClick={() => setBannerSize(k)}
+                    className={bannerSize === k ? 'nm-btn-accent' : 'nm-btn'}
+                    style={{ flex: 1, padding: '8px 4px', fontSize: 11, fontWeight: 800, borderRadius: 10 }}>
+                    {LABEL_SIZES[k].name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {lists.map((l: any) => (
+              <div key={l.id} style={{ borderRadius: 12, boxShadow: 'var(--nm-inset)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--nm-text)' }}>
+                    {l.source || 'Lista de etiquetas'}
+                  </div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--nm-text-muted)' }}>
+                    Enviada por {l.created_by} · {new Date(l.created_at).toLocaleString('es-MX')} ·{' '}
+                    {(l.label_list_items || []).length} productos · <b>{listCount(l)} etiquetas</b>
+                  </div>
+                </div>
+                <details>
+                  <summary style={{ fontSize: 11, fontWeight: 700, cursor: 'pointer', color: 'var(--nm-text-muted)' }}>Ver productos de la lista</summary>
+                  <div style={{ maxHeight: 160, overflow: 'auto', marginTop: 6 }}>
+                    {(l.label_list_items || []).map((it: any, i: number) => (
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11, padding: '2px 0' }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.name}</span>
+                        <span style={{ fontWeight: 800, flexShrink: 0 }}>× {it.qty}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={() => printList(l)} disabled={!bannerSize || busyList === l.id}
+                    className="nm-btn-accent"
+                    style={{ flex: 2, padding: '10px', fontSize: 12, fontWeight: 900, opacity: (!bannerSize || busyList === l.id) ? 0.4 : 1 }}>
+                    {busyList === l.id ? 'Enviando…' : bannerSize ? `🖨️ Imprimir las ${listCount(l)}` : 'Elige un tamaño primero'}
+                  </button>
+                  <button onClick={() => loadList(l)} disabled={busyList === l.id} className="nm-btn"
+                    style={{ flex: 1, padding: '10px', fontSize: 11, fontWeight: 800 }}>
+                    Cargar a la lista
+                  </button>
+                  <button onClick={() => discardList(l)} disabled={busyList === l.id} className="nm-btn"
+                    style={{ padding: '10px', fontSize: 11, fontWeight: 800, color: 'var(--nm-danger)' }}>
+                    Descartar
+                  </button>
+                </div>
+              </div>
+            ))}
+            {listMsg && (
+              <div style={{
+                fontSize: 12, fontWeight: 600, padding: '8px 12px', borderRadius: 10,
+                background: listMsg.ok ? 'rgba(52,199,89,0.08)' : 'rgba(255,59,48,0.08)',
+                border: `1px solid ${listMsg.ok ? 'rgba(52,199,89,0.2)' : 'rgba(255,59,48,0.2)'}`,
+                color: listMsg.ok ? '#1A8F3A' : 'var(--nm-danger)',
+              }}>{listMsg.text}</div>
+            )}
+          </div>
+        )}
+        {lists.length === 0 && listMsg?.ok && (
+          <div style={{ fontSize: 12, fontWeight: 600, padding: '8px 12px', borderRadius: 10, background: 'rgba(52,199,89,0.08)', border: '1px solid rgba(52,199,89,0.2)', color: '#1A8F3A' }}>
+            {listMsg.text}
+          </div>
+        )}
+
         {/* Search */}
         <div style={{ background: 'var(--nm-bg)', borderRadius: 16, boxShadow: 'var(--nm-raised)', padding: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 900, color: 'var(--nm-text)', marginBottom: 10 }}>
