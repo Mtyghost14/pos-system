@@ -64,6 +64,7 @@ export async function reloadCloud(): Promise<{ ok: boolean; message?: string }> 
     ready = true
     subscribeRealtime()
     void syncCatalogToLocal()
+    void runCostBackfillOnce()
     if (periodicTimer) clearInterval(periodicTimer)
     periodicTimer = setInterval(() => { if (ready) void syncCatalogToLocal() }, 60_000)
     return { ok: true }
@@ -157,6 +158,46 @@ export async function syncCatalogToLocal(): Promise<{ ok: boolean; message?: str
   } finally {
     syncing = false
   }
+}
+
+/**
+ * Sube a la nube el costo (al momento de vender) de cada renglón de venta que ya estaba subido sin costo.
+ * Sirve para la utilidad por categoría / producto del portal. Idempotente: la nube solo rellena los que
+ * están vacíos. Devuelve cuántos renglones actualizó.
+ */
+export async function backfillItemCosts(): Promise<{ ok: boolean; updated?: number; message?: string }> {
+  if (!ready || !client) return { ok: false, message: 'Sin conexión con la nube' }
+  try {
+    const rows = getDb().prepare(`
+      SELECT s.folio AS folio, COALESCE(si.product_code, p.code) AS code, si.unit_cost AS unit_cost
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      LEFT JOIN products p ON si.product_id = p.id
+      WHERE si.unit_cost IS NOT NULL AND COALESCE(si.product_code, p.code) IS NOT NULL
+    `).all() as any[]
+    let updated = 0
+    const CHUNK = 500
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const { data, error } = await client.rpc('backfill_item_costs', { p: rows.slice(i, i + CHUNK) })
+      if (error) return { ok: false, updated, message: error.message }
+      updated += (data as number) ?? 0
+    }
+    return { ok: true, updated }
+  } catch (e: any) {
+    return { ok: false, message: e?.message || 'Error al actualizar costos' }
+  }
+}
+
+// Una sola vez (por instalación): al conectarse, completa los costos de las ventas ya subidas.
+// Si la nube aún no tiene la función (falta correr el SQL), no marca como hecho y reintenta al siguiente arranque.
+async function runCostBackfillOnce() {
+  try {
+    const db = getDb()
+    const done = db.prepare("SELECT value FROM settings WHERE key = 'costs_backfill_done'").get() as any
+    if (done?.value === '1') return
+    const r = await backfillItemCosts()
+    if (r.ok) db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('costs_backfill_done', '1')").run()
+  } catch { /* se reintenta en el siguiente arranque */ }
 }
 
 export function initCloud(browserWindow: BrowserWindow) {
@@ -369,13 +410,13 @@ function registerCloudHandlers() {
       SELECT si.sale_id,
              COALESCE(si.product_code, p.code) AS code,
              COALESCE(si.product_name, p.name) AS name,
-             si.quantity AS qty, si.unit_price, si.discount
+             si.quantity AS qty, si.unit_price, si.unit_cost, si.discount
       FROM sale_items si LEFT JOIN products p ON si.product_id = p.id
     `).all() as any[]) {
       if (!itemsBySale.has(it.sale_id)) itemsBySale.set(it.sale_id, [])
       itemsBySale.get(it.sale_id)!.push({
         code: it.code, name: it.name, qty: it.qty,
-        unit_price: it.unit_price, discount: it.discount ?? 0,
+        unit_price: it.unit_price, unit_cost: it.unit_cost ?? null, discount: it.discount ?? 0,
       })
     }
 
@@ -400,11 +441,17 @@ function registerCloudHandlers() {
       else uploaded += (data as number) ?? 0
     }
 
+    // Completa el costo por renglón de lo que ya estaba subido (utilidad por categoría/producto).
+    const costs = await backfillItemCosts()
+    if (costs.ok) { try { db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('costs_backfill_done', '1')").run() } catch { /* ignore */ } }
+    else errors.push(`Costos por producto: ${costs.message}`)
+
     return {
       ok: errors.length === 0,
       uploaded,
       skipped: sales.length - pending.length,
       total: sales.length,
+      costsUpdated: costs.updated ?? 0,
       errors: errors.slice(0, 10),
     }
   })

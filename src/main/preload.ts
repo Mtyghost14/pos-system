@@ -137,7 +137,7 @@ const api = {
   cloudMigrateCatalog: (): Promise<{ ok: boolean; message?: string; uploaded?: number; skipped?: number; barcodesUploaded?: number; total?: number; errors?: string[] }> =>
     ipcRenderer.invoke('cloud:migrateCatalog'),
   cloudSyncNow: (): Promise<{ ok: boolean; message?: string; products?: number }> => ipcRenderer.invoke('cloud:syncNow'),
-  cloudMigrateSales: (): Promise<{ ok: boolean; message?: string; uploaded?: number; skipped?: number; total?: number; errors?: string[] }> =>
+  cloudMigrateSales: (): Promise<{ ok: boolean; message?: string; uploaded?: number; skipped?: number; total?: number; costsUpdated?: number; errors?: string[] }> =>
     ipcRenderer.invoke('cloud:migrateSales'),
   labelsPending: (): Promise<{ ok: boolean; data?: any[]; message?: string }> => ipcRenderer.invoke('labels:listPending'),
   labelsSetStatus: (id: number, status: 'impresa' | 'cargada' | 'descartada'): Promise<{ ok: boolean; message?: string }> =>

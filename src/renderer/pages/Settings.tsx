@@ -1248,7 +1248,7 @@ function SyncTab({ showMsg }: any) {
           <div style={{ fontSize: 12, fontWeight: 700, color: migSResult.ok ? 'var(--nm-success)' : 'var(--nm-warning)', lineHeight: 1.6 }}>
             {migSResult.message
               ? `⚠️ ${migSResult.message}`
-              : `Subidas: ${migSResult.uploaded} · Ya existían: ${migSResult.skipped} (de ${migSResult.total})`}
+              : `Subidas: ${migSResult.uploaded} · Ya existían: ${migSResult.skipped} (de ${migSResult.total}) · Costos por producto actualizados: ${migSResult.costsUpdated ?? 0}`}
             {migSResult.errors?.length > 0 && (
               <div style={{ marginTop: 6, color: 'var(--nm-danger)', fontWeight: 600 }}>
                 {migSResult.errors.map((e: string, i: number) => <div key={i}>· {e}</div>)}
