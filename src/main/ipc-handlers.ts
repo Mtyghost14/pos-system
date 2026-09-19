@@ -1,6 +1,7 @@
 import { ipcMain, dialog, app, BrowserWindow } from 'electron'
 import { getDb, checkpointDb, closeDb } from './database'
 import { isCloudReady, getCloudClient, cloudRpc, syncCatalogToLocal } from './cloud'
+import { registerReceiveHandlers } from './receive'
 import bcrypt from 'bcryptjs'
 import { join } from 'path'
 import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'fs'
@@ -18,6 +19,7 @@ function generateFolio(): string {
 }
 
 export function registerIpcHandlers() {
+  registerReceiveHandlers()
   const db = getDb()
 
   // ─── AUTH ───────────────────────────────────────────────────────────────────
@@ -221,17 +223,24 @@ export function registerIpcHandlers() {
     let imported = 0, updated = 0
     const errors: string[] = []
     const have = new Set((db.prepare('SELECT code FROM products WHERE cloud_id IS NOT NULL').all() as any[]).map(r => r.code))
+    const curStmt = db.prepare(`SELECT p.cost, p.min_stock, c.name AS category
+      FROM products p LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.code = ? AND p.cloud_id IS NOT NULL`)
     for (const row of rows) {
       try {
+        // Si el producto ya existe, lo que el Excel no traiga se conserva (no se borra a 0/sin categoría)
+        // y NO se manda stock: el stock de un producto existente no se toca desde aquí
+        // (para sumar mercancía está "Recibir mercancía"). Así tampoco se genera un movimiento falso.
+        const cur = curStmt.get(String(row.code)) as any
         await cloudRpc('upsert_product', {
           p_id: null,
           p_code: String(row.code),
           p_name: row.name,
-          p_category: row.category || null,
-          p_cost: row.cost || 0,
+          p_category: row.category || cur?.category || null,
+          p_cost: row.cost ?? cur?.cost ?? 0,
           p_price: row.price || 0,
-          p_min_stock: row.min_stock || 0,
-          p_stock: row.stock || 0,
+          p_min_stock: row.min_stock ?? cur?.min_stock ?? 0,
+          p_stock: cur ? 0 : (row.stock || 0),
         })
         if (have.has(String(row.code))) updated++; else imported++
       } catch (e: any) {
@@ -1370,7 +1379,15 @@ export function registerIpcHandlers() {
           headers = values.map(v => String(v || '').trim().toLowerCase())
         } else {
           const obj: any = {}
-          headers.forEach((h, i) => { obj[h] = values[i] })
+          headers.forEach((h, i) => {
+            let v = values[i]
+            if (v && typeof v === 'object' && !(v instanceof Date)) {
+              if ('result' in v) v = (v as any).result
+              else if ('text' in v) v = (v as any).text
+              else if ('richText' in v) v = (v as any).richText.map((r: any) => r.text).join('')
+            }
+            obj[h] = v
+          })
           rows.push(obj)
         }
       })

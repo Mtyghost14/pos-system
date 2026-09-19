@@ -78,7 +78,7 @@ export default function Products() {
       {tab === 'categorias' && <CategoriesTab categories={categories} reload={loadCategories} showMsg={showMsg} />}
       {tab === 'ventas' && <SalesByPeriodTab />}
       {tab === 'promociones' && <PromotionsTab products={products} />}
-      {tab === 'importar' && <ImportTab reload={loadProducts} showMsg={showMsg} categories={categories} />}
+      {tab === 'importar' && <ImportTab reload={loadProducts} showMsg={showMsg} categories={categories} userName={user?.name} />}
       {tab === 'exportar' && <ExportTab products={products} />}
       {tab === 'etiquetas' && <LabelsTab products={products} />}
     </PageShell>
@@ -1045,7 +1045,259 @@ function PromotionsTab({ products }: any) {
 }
 
 // ─── IMPORT TAB ──────────────────────────────────────────────────────────────
-function ImportTab({ reload, showMsg, categories }: any) {
+function ImportTab({ reload, showMsg, categories, userName }: any) {
+  const [mode, setMode] = useState<'recibir' | 'catalogo'>('recibir')
+  const card: React.CSSProperties = { background: 'var(--nm-bg)', borderRadius: 16, boxShadow: 'var(--nm-raised)', padding: 16 }
+  return (
+    <div className="space-y-4" style={{ maxWidth: 820 }}>
+      <div style={{ ...card, display: 'flex', gap: 10 }}>
+        {([['recibir', '📥 Recibir mercancía (suma al inventario)'], ['catalogo', '📋 Actualizar catálogo']] as const).map(([id, label]) => (
+          <button key={id} onClick={() => setMode(id)}
+            className={mode === id ? 'nm-btn-accent' : 'nm-btn'}
+            style={{ flex: 1, padding: '10px 12px', fontSize: 13, fontWeight: 800 }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {mode === 'recibir'
+        ? <ReceiveTab reload={reload} showMsg={showMsg} userName={userName} />
+        : <CatalogImport reload={reload} showMsg={showMsg} categories={categories} />}
+    </div>
+  )
+}
+
+// ─── RECIBIR MERCANCÍA (Excel que SUMA al inventario) ────────────────────────
+const RECV_FIELDS: { id: string; label: string; required?: boolean; hint?: string }[] = [
+  { id: 'code', label: 'Código', required: true },
+  { id: 'quantity', label: 'Cantidad recibida', required: true },
+  { id: 'name', label: 'Nombre', hint: 'obligatorio solo si el producto es nuevo' },
+  { id: 'price', label: 'Precio de venta', hint: 'obligatorio solo si el producto es nuevo' },
+  { id: 'cost', label: 'Costo' },
+  { id: 'category', label: 'Categoría' },
+  { id: 'min_stock', label: 'Stock mínimo' },
+]
+const RECV_EXACT: Record<string, string[]> = {
+  code: ['codigo', 'code', 'codigo de barras', 'barras', 'sku'],
+  quantity: ['cantidad', 'cant', 'piezas', 'pzas', 'qty', 'recibido', 'unidades', 'stock'],
+  name: ['nombre', 'descripcion', 'producto', 'articulo', 'name'],
+  price: ['precio', 'price', 'precio de venta'],
+  cost: ['costo', 'cost'],
+  category: ['categoria', 'departamento', 'depto', 'category'],
+  min_stock: ['minimo', 'stock minimo', 'min stock', 'min_stock'],
+}
+const RECV_FUZZY: Record<string, string[]> = {
+  code: ['codigo', 'barras'], quantity: ['cantidad', 'piezas'], name: ['nombre', 'descripcion', 'producto'],
+  price: ['precio'], cost: ['costo'], category: ['categoria', 'departamento'], min_stock: ['minimo'],
+}
+const normHeader = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim()
+
+function autoMapReceive(headers: string[]) {
+  const used = new Set<string>()
+  const map: Record<string, string> = {}
+  const order = ['code', 'quantity', 'min_stock', 'name', 'price', 'cost', 'category']
+  for (const f of order) {
+    let hit = headers.find(h => !used.has(h) && RECV_EXACT[f].includes(normHeader(h)))
+    if (!hit) hit = headers.find(h => !used.has(h) && RECV_FUZZY[f].some(k => normHeader(h).includes(k)))
+    if (hit) { map[f] = hit; used.add(hit) }
+  }
+  return map
+}
+
+function ReceiveTab({ reload, showMsg, userName }: any) {
+  const [filePath, setFilePath] = useState('')
+  const [headers, setHeaders] = useState<string[]>([])
+  const [rawRows, setRawRows] = useState<any[]>([])
+  const [mapping, setMapping] = useState<Record<string, string>>({})
+  const [plan, setPlan] = useState<any>(null)
+  const [busy, setBusy] = useState(false)
+  const [again, setAgain] = useState(false)
+  const [result, setResult] = useState<any>(null)
+
+  const card: React.CSSProperties = { background: 'var(--nm-bg)', borderRadius: 16, boxShadow: 'var(--nm-raised)', padding: 16 }
+  const fileName = filePath.split(/[\\/]/).pop() || ''
+
+  const downloadTemplate = async () => {
+    await (window.api as any).exportToExcel({
+      filename: 'plantilla_recepcion.xlsx',
+      sheetName: 'Recepción',
+      columns: [
+        { header: 'Código', key: 'code', width: 20 },
+        { header: 'Nombre', key: 'name', width: 36 },
+        { header: 'Cantidad', key: 'quantity', width: 12 },
+        { header: 'Costo', key: 'cost', width: 12 },
+        { header: 'Precio', key: 'price', width: 12 },
+        { header: 'Categoría', key: 'category', width: 20 },
+      ],
+      rows: [],
+    })
+  }
+
+  const handleSelectFile = async () => {
+    const result = await window.api.showOpenDialog({ filters: [{ name: 'Excel', extensions: ['xlsx', 'xls'] }] })
+    if (result.canceled || !result.filePaths[0]) return
+    const fp = result.filePaths[0]
+    const data = await window.api.readExcelFile(fp)
+    if (!data.success) { showMsg(data.message, 'err'); return }
+    setFilePath(fp); setHeaders(data.headers); setRawRows(data.rows)
+    setMapping(autoMapReceive(data.headers))
+    setPlan(null); setResult(null); setAgain(false)
+  }
+
+  const mappedRows = () => rawRows.map((r, i) => {
+    const o: any = { row: i + 2 }
+    for (const [f, h] of Object.entries(mapping)) if (h) o[f] = r[h]
+    return o
+  })
+
+  const handlePreview = async () => {
+    if (!mapping.code || !mapping.quantity) { showMsg('Indica qué columna es el Código y cuál la Cantidad', 'err'); return }
+    setBusy(true); setResult(null); setAgain(false)
+    const res = await (window.api as any).receivePreview(mappedRows(), filePath)
+    setBusy(false)
+    if (!res.success) { showMsg(res.message || 'No se pudo revisar el archivo', 'err'); return }
+    setPlan(res)
+  }
+
+  const okItems = plan ? plan.items.filter((i: any) => i.status !== 'error') : []
+  const badItems = plan ? plan.items.filter((i: any) => i.status === 'error') : []
+  const totalUnits = okItems.reduce((s: number, i: any) => s + i.quantity, 0)
+  const nNuevo = okItems.filter((i: any) => i.status === 'nuevo').length
+  const needAgain = !!plan?.previousImportAt && !again
+
+  const handleApply = async () => {
+    setBusy(true)
+    const res = await (window.api as any).receiveProducts(mappedRows(), filePath, userName || '')
+    setBusy(false)
+    if (res.message && res.success === false && res.added === undefined) { showMsg(res.message, 'err'); return }
+    setResult(res); setPlan(null)
+    reload()
+    showMsg(res.success ? `Recepción aplicada: ${res.units} piezas` : 'La recepción terminó con errores', res.success ? 'ok' : 'err')
+  }
+
+  const badge = (st: string) => {
+    const m: any = {
+      existente: ['Suma', '#1a7f37'], nuevo: ['Producto nuevo', '#0969da'],
+      reactivar: ['Reactivar', '#9a6700'], error: ['Error', '#b3261e'],
+    }
+    const [t, c] = m[st] || [st, '#555']
+    return <span style={{ color: c, fontWeight: 800, fontSize: 11 }}>{t}</span>
+  }
+
+  return (
+    <div className="space-y-4">
+      <div style={card}>
+        <h2 className="font-bold text-gray-900 mb-2">Recibir mercancía desde Excel</h2>
+        <p className="text-sm text-gray-500 mb-3">
+          Sube el Excel de lo que recibiste. Si el código <b>ya existe</b>, la cantidad se <b>suma</b> al inventario;
+          si es <b>nuevo</b>, se da de alta (necesita nombre y precio). Si un código se repite en el archivo, se suman entre sí.
+          Antes de aplicar verás una vista previa.
+        </p>
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={handleSelectFile} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium">Seleccionar archivo Excel</button>
+          <button onClick={downloadTemplate} className="border px-4 py-2 rounded-lg text-sm font-medium text-gray-700">⬇ Descargar plantilla</button>
+        </div>
+        {fileName && <div className="text-xs text-gray-500 mt-2">Archivo: <b>{fileName}</b> · {rawRows.length} filas</div>}
+        <p className="text-xs text-gray-400 mt-2">Tip: en Excel, deja la columna del código con formato <b>Texto</b> para que no pierda ceros a la izquierda.</p>
+      </div>
+
+      {result && (
+        <div style={card}>
+          <div style={{ fontWeight: 800, color: result.success ? '#1a7f37' : '#9a6700', marginBottom: 6 }}>
+            {result.success ? '✅ Recepción aplicada' : '⚠️ Recepción aplicada con errores'}
+          </div>
+          <div className="text-sm text-gray-700">
+            Existentes sumados: <b>{result.added}</b> · Productos nuevos creados: <b>{result.created}</b>
+            {result.reactivated ? <> · Reactivados: <b>{result.reactivated}</b></> : null} · Piezas recibidas: <b>{result.units}</b>
+          </div>
+          {result.errors?.length > 0 && (
+            <div className="text-xs mt-2" style={{ color: '#b3261e' }}>
+              {result.errors.map((e: string, i: number) => <div key={i}>· {e}</div>)}
+              {result.errorCount > result.errors.length && <div>… y {result.errorCount - result.errors.length} más</div>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {headers.length > 0 && (
+        <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <h3 className="font-bold text-gray-900">Columnas del archivo</h3>
+          <div className="grid grid-cols-2 gap-3">
+            {RECV_FIELDS.map(f => (
+              <div key={f.id}>
+                <label className="text-sm font-medium text-gray-700">{f.label}{f.required ? ' *' : ''}</label>
+                {f.hint && <span className="text-xs text-gray-400"> ({f.hint})</span>}
+                <select value={mapping[f.id] || ''} onChange={e => { setMapping(m => ({ ...m, [f.id]: e.target.value })); setPlan(null) }}
+                  className="mt-1 w-full border rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">No mapear</option>
+                  {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+          <button onClick={handlePreview} disabled={busy} className="w-full bg-blue-600 text-white font-bold py-2 rounded-lg text-sm" style={{ opacity: busy ? 0.6 : 1 }}>
+            {busy ? 'Revisando…' : 'Revisar antes de aplicar'}
+          </button>
+        </div>
+      )}
+
+      {plan && (
+        <div style={{ ...card, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <h3 className="font-bold text-gray-900">Vista previa</h3>
+          <div className="text-sm text-gray-700">
+            <b>{okItems.length}</b> producto(s) — <b>{okItems.length - nNuevo}</b> existentes, <b>{nNuevo}</b> nuevos ·
+            <b> {totalUnits}</b> piezas en total
+            {plan.repeatedRows > 0 && <> · {plan.repeatedRows} fila(s) con código repetido se sumaron</>}
+            {badItems.length > 0 && <span style={{ color: '#b3261e' }}> · {badItems.length} con error (se omiten)</span>}
+          </div>
+
+          {plan.previousImportAt && (
+            <div style={{ border: '1px solid #d4a72c', background: 'rgba(212,167,44,0.12)', borderRadius: 10, padding: 10, fontSize: 12 }}>
+              ⚠️ Un archivo llamado <b>{plan.fileName}</b> ya se recibió el{' '}
+              <b>{new Date(plan.previousImportAt).toLocaleString('es-MX')}</b>. Si lo aplicas otra vez, las cantidades se <b>sumarán de nuevo</b>.
+              <label className="flex items-center gap-2 mt-2">
+                <input type="checkbox" checked={again} onChange={e => setAgain(e.target.checked)} />
+                Es otra recepción, sumar de todos modos
+              </label>
+            </div>
+          )}
+
+          <div style={{ maxHeight: 340, overflow: 'auto' }}>
+            <table className="text-xs border-collapse w-full">
+              <thead>
+                <tr>
+                  {['Estado', 'Código', 'Producto', 'Suma', 'Stock actual', 'Quedará'].map(h => (
+                    <th key={h} className="border px-2 py-1 bg-gray-50 font-medium text-left sticky top-0">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {plan.items.map((it: any, i: number) => (
+                  <tr key={i}>
+                    <td className="border px-2 py-1">{badge(it.status)}</td>
+                    <td className="border px-2 py-1 font-mono">{it.code}</td>
+                    <td className="border px-2 py-1">{it.status === 'error' ? <span style={{ color: '#b3261e' }}>{it.message}</span> : it.name}</td>
+                    <td className="border px-2 py-1 text-right">{it.status === 'error' ? '' : `+${it.quantity}`}</td>
+                    <td className="border px-2 py-1 text-right">{it.status === 'error' ? '' : it.stockActual}</td>
+                    <td className="border px-2 py-1 text-right font-bold">{it.status === 'error' ? '' : it.stockNuevo}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <button onClick={handleApply} disabled={busy || okItems.length === 0 || needAgain}
+            className="w-full bg-green-600 text-white font-bold py-2 rounded-lg text-sm"
+            style={{ opacity: (busy || okItems.length === 0 || needAgain) ? 0.5 : 1 }}>
+            {busy ? 'Aplicando…' : `Sumar ${totalUnits} piezas al inventario`}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── ACTUALIZAR CATÁLOGO (importación clásica: crea/actualiza fichas de producto) ───
+function CatalogImport({ reload, showMsg, categories }: any) {
   const [preview, setPreview] = useState<any[] | null>(null)
   const [headers, setHeaders] = useState<string[]>([])
   const [filePath, setFilePath] = useState('')
@@ -1099,7 +1351,7 @@ function ImportTab({ reload, showMsg, categories }: any) {
     <div className="max-w-xl space-y-4">
       <div style={{ background: "var(--nm-bg)", borderRadius: 16, boxShadow: "var(--nm-raised)", padding: 16 }}>
         <h2 className="font-bold text-gray-900 mb-3">Importar Productos desde Excel</h2>
-        <p className="text-sm text-gray-500 mb-3">El archivo debe tener columnas: código, nombre, precio. Opcionales: costo, stock, min_stock, categoría.</p>
+        <p className="text-sm text-gray-500 mb-3">El archivo debe tener columnas: código, nombre, precio. Opcionales: costo, stock, min_stock, categoría. Crea productos nuevos (con su stock) y actualiza nombre/precio/costo/categoría de los existentes; <b>no cambia el stock de los que ya existen</b> — para sumar mercancía usa «Recibir mercancía».</p>
         <button onClick={handleSelectFile} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium">Seleccionar archivo Excel</button>
       </div>
       {preview && headers.length > 0 && (

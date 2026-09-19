@@ -16,6 +16,8 @@ const api = {
   updateProduct: (data: any) => ipcRenderer.invoke('products:update', data),
   deleteProduct: (id: number) => ipcRenderer.invoke('products:delete', id),
   importProducts: (rows: any[]) => ipcRenderer.invoke('products:import', rows),
+  receivePreview: (rows: any[], filePath: string): Promise<any> => ipcRenderer.invoke('products:receivePreview', rows, filePath),
+  receiveProducts: (rows: any[], filePath: string, userName: string): Promise<any> => ipcRenderer.invoke('products:receive', rows, filePath, userName),
   exportProducts: () => ipcRenderer.invoke('products:export'),
 
   // Extra barcodes
