@@ -362,7 +362,7 @@ export default function Layout() {
                   Ya hay un turno abierto
                 </h2>
                 <p style={{ margin: '0 0 18px', fontSize: 13, fontWeight: 500, color: 'var(--nm-text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
-                  No se puede abrir otro turno mientras haya uno sin cerrar. Continúa con ese turno y haz su corte cuando termines.
+                  No se puede abrir otro turno ni vender en él hasta que se haga el corte. Quien abrió ese turno ({otherShift.cashier_name || 'otro usuario'}) debe iniciar sesión y hacer su corte.
                 </p>
                 <div style={{
                   width: '100%', marginBottom: 18, background: 'var(--nm-bg)', borderRadius: 12,
@@ -373,22 +373,8 @@ export default function Layout() {
                     Abierto: {otherShift.started_at} · Fondo inicial: ${Number(otherShift.opening_cash || 0).toFixed(2)}
                   </div>
                 </div>
-                <button
-                  onClick={() => { setShift(otherShift); setOtherShift(null) }}
-                  className="nm-btn-accent"
-                  style={{ width: '100%', padding: '15px', fontSize: 16 }}
-                >
-                  Continuar con el Turno #{otherShift.id} →
-                </button>
-                <button
-                  onClick={handleLogout}
-                  style={{
-                    marginTop: 14, background: 'none', border: 'none', cursor: 'pointer',
-                    fontSize: 12, fontWeight: 600, color: 'var(--nm-text-light)',
-                    fontFamily: '-apple-system, SF Pro Text, Inter, sans-serif',
-                  }}
-                >
-                  Cancelar y cerrar sesión
+                <button onClick={handleLogout} className="nm-btn" style={{ width: '100%', padding: '14px', fontSize: 15, fontWeight: 800 }}>
+                  Cerrar sesión
                 </button>
               </>
             ) : (
