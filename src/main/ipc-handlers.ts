@@ -265,8 +265,10 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('shifts:open', (_, data: any) => {
-    // Close any previously open shifts for this cashier
-    db.prepare("UPDATE shifts SET status='closed', ended_at=datetime('now','localtime') WHERE cashier_id=? AND status='open'").run(data.cashier_id)
+    // Un turno solo se cierra con el corte. Si este cajero ya tiene uno abierto (p. ej. se fue la luz
+    // y volvió a entrar) NO se cierra ni se duplica: se reutiliza, sin tocar su fondo inicial.
+    const existing = db.prepare("SELECT id FROM shifts WHERE cashier_id=? AND status='open' ORDER BY id DESC LIMIT 1").get(data.cashier_id) as any
+    if (existing) return { success: true, id: existing.id, existing: true }
     const res = db.prepare('INSERT INTO shifts (cashier_id, opening_cash) VALUES (?,?)').run(data.cashier_id, data.opening_cash)
     return { success: true, id: res.lastInsertRowid }
   })

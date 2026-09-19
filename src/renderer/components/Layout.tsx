@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/useAuthStore'
 import { useSettingsStore } from '../store/useSettingsStore'
@@ -114,6 +114,24 @@ export default function Layout() {
   const [openingError, setOpeningError] = useState('')
   const [showLogoutBlock, setShowLogoutBlock] = useState(false)
   const [showCashCounter, setShowCashCounter] = useState(false)
+  // El turno vive en la base de datos hasta que se hace el corte: al entrar (p. ej. después de un
+  // apagón) se recupera el turno abierto de este cajero en vez de pedir el efectivo inicial otra vez.
+  const [shiftChecked, setShiftChecked] = useState(false)
+  const [restoredShift, setRestoredShift] = useState<any>(null)
+
+  useEffect(() => {
+    if (!user) return
+    if (shift) { setShiftChecked(true); return }
+    let alive = true
+    window.api.getActiveShift(user.id)
+      .then((sh: any) => {
+        if (!alive) return
+        if (sh) { setShift(sh); setRestoredShift(sh) }
+        setShiftChecked(true)
+      })
+      .catch(() => { if (alive) setShiftChecked(true) })
+    return () => { alive = false }
+  }, [user?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = () => {
     if (shift) {
@@ -138,6 +156,7 @@ export default function Layout() {
       const sh = await window.api.getActiveShift(user.id)
       setShift(sh)
       setOpeningCash('')
+      if (res.existing) { setRestoredShift(sh); return } // ya había un turno abierto: se recupera, sin nuevo ticket de apertura
       // Imprime ticket de apertura con el fondo inicial y renglón de firma para trazar responsabilidad
       try {
         await window.api.printShiftOpen({
@@ -304,7 +323,7 @@ export default function Layout() {
       )}
 
       {/* ── Shift Opening Gate ── blocks the entire app until a shift is open */}
-      {!shift && (
+      {shiftChecked && !shift && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 100,
           background: 'rgba(242,242,247,0.75)',
@@ -411,6 +430,31 @@ export default function Layout() {
           )}
         </div>
       )}
+
+      {/* ── Aviso: se recuperó un turno que había quedado abierto (apagón, cierre inesperado…) ── */}
+      {restoredShift && shift && (() => {
+        const started = String(restoredShift.started_at || '')
+        const d = new Date()
+        const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        const fromBefore = started.slice(0, 10) !== today
+        return (
+          <div style={{
+            position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 200,
+            background: fromBefore ? '#8a6d00' : '#1a7f37', color: '#fff', borderRadius: 12,
+            padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 14, maxWidth: 620,
+            boxShadow: '0 6px 24px rgba(0,0,0,0.3)', fontSize: 13, fontWeight: 600, lineHeight: 1.4,
+          }}>
+            <div style={{ flex: 1 }}>
+              ♻️ Se recuperó tu <b>Turno #{restoredShift.id}</b> (abierto el {started || '—'}). Sus ventas y su fondo inicial siguen ahí — no hace falta capturar el efectivo otra vez.
+              {fromBefore && <> Este turno viene de un día anterior: continúa normal y haz el corte cuando termines.</>}
+            </div>
+            <button onClick={() => setRestoredShift(null)} style={{
+              background: 'rgba(255,255,255,0.22)', border: 'none', color: '#fff', borderRadius: 8,
+              padding: '7px 14px', cursor: 'pointer', fontWeight: 800, fontSize: 12,
+            }}>Entendido</button>
+          </div>
+        )
+      })()}
     </div>
   )
 }

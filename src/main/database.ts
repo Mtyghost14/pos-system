@@ -26,6 +26,8 @@ export function initDatabase() {
 
   db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
+  // Lo confirmado (ventas, turno abierto) debe sobrevivir a un apagón: con WAL el default puede perder las últimas transacciones.
+  db.pragma('synchronous = FULL')
   db.pragma('foreign_keys = ON')
 
   createTables()
