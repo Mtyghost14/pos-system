@@ -289,11 +289,19 @@ export function registerIpcHandlers() {
   ipcMain.handle('shifts:getAnyOpen', () => db.prepare(openShiftsSql + ' LIMIT 1').get())
 
   ipcMain.handle('shifts:close', (_, data: any) => {
+    // El corte lo hace quien abrió el turno. Si lo hace otra persona, tiene que ser un administrador.
+    const sh = db.prepare('SELECT cashier_id FROM shifts WHERE id = ?').get(data.shift_id) as any
+    if (sh && data.closed_by && sh.cashier_id !== data.closed_by) {
+      const u = db.prepare('SELECT role FROM users WHERE id = ?').get(data.closed_by) as any
+      if (u?.role !== 'admin') {
+        return { success: false, message: 'Solo un administrador puede hacer el corte del turno de otra persona.' }
+      }
+    }
     const summary = getShiftSummaryData(data.shift_id)
     db.prepare(`
       UPDATE shifts SET status='closed', ended_at=datetime('now','localtime'),
-      closing_cash=?, expected_cash=? WHERE id=?
-    `).run(data.closing_cash, summary.expected_cash, data.shift_id)
+      closing_cash=?, expected_cash=?, closed_by=? WHERE id=?
+    `).run(data.closing_cash, summary.expected_cash, data.closed_by ?? sh?.cashier_id ?? null, data.shift_id)
     return { success: true, summary }
   })
 
@@ -404,6 +412,14 @@ export function registerIpcHandlers() {
   ipcMain.handle('sales:create', async (_, data: any) => {
     if (!isCloudReady()) {
       return { success: false, message: 'Sin conexión con la nube. No se puede registrar la venta.' }
+    }
+    // Nadie vende dentro del turno de otra persona: el turno tiene que estar abierto y ser de quien cobra.
+    if (data.shift_id) {
+      const sh = db.prepare("SELECT cashier_id, status FROM shifts WHERE id = ?").get(data.shift_id) as any
+      if (!sh || sh.status !== 'open') return { success: false, message: 'El turno ya está cerrado. Abre un turno nuevo.' }
+      if (data.cashier_id && sh.cashier_id !== data.cashier_id) {
+        return { success: false, message: 'Este turno pertenece a otra persona. Hay que hacer su corte antes de abrir otro turno.' }
+      }
     }
     const folio = generateFolio()
 

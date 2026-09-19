@@ -206,7 +206,7 @@ export default function Corte() {
     storeAddress: settings?.store_address,
     storePhone: settings?.store_phone,
     storeSocial: settings?.store_social || settings?.store_instagram,
-    cashierName: user?.name,
+    cashierName: (shift as any)?.cashier_name || user?.name,   // el dueño del turno (aunque el corte lo haga un admin)
     shiftId: shift?.id,
     startedAt: fmtDate(shift?.started_at || ''),
     endedAt: fmtDate(new Date().toISOString()),
@@ -234,10 +234,12 @@ export default function Corte() {
     if (!shift || !user) return
     setLoading(true)
     const printData = buildPrintData(parseFloat(countedCash) || 0)
-    const res = await window.api.closeShift({ shift_id: shift.id, closing_cash: parseFloat(countedCash) || 0 })
+    const res = await window.api.closeShift({ shift_id: shift.id, closing_cash: parseFloat(countedCash) || 0, closed_by: user.id })
     if (res.success) {
       setClosedData(printData)
       // Don't navigate yet — show print button in modal first
+    } else if ((res as any).message) {
+      alert((res as any).message)
     }
     setLoading(false)
   }
@@ -306,6 +308,7 @@ export default function Corte() {
         </h1>
         <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--nm-text-muted)' }}>
           Turno #{shift.id} — Inicio: {fmtDate(shift.started_at)}
+          {(shift as any).cashier_name && shift.cashier_id !== user?.id && <> · de <b>{(shift as any).cashier_name}</b> (corte hecho por {user?.name} como administrador)</>}
         </span>
         <div style={{ flex: 1 }} />
         <button onClick={loadSummary} className="nm-btn" style={{ padding: '6px 14px', fontSize: 12, color: 'var(--nm-accent)' }}>

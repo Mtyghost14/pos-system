@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import { useAuthStore } from '../store/useAuthStore'
 import { useSettingsStore } from '../store/useSettingsStore'
 
@@ -110,6 +110,7 @@ export default function Layout() {
   const { user, shift, setShift, logout } = useAuthStore()
   const { settings } = useSettingsStore()
   const navigate = useNavigate()
+  const location = useLocation()
   const [openingCash, setOpeningCash] = useState('')
   const [openingError, setOpeningError] = useState('')
   const [showLogoutBlock, setShowLogoutBlock] = useState(false)
@@ -137,6 +138,12 @@ export default function Layout() {
       .catch(() => { if (alive) setShiftChecked(true) })
     return () => { alive = false }
   }, [user?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Un admin haciendo el corte del turno de OTRA persona: solo puede estar en Corte (no se vende en ese turno).
+  const corteAjeno = !!(shift && user && shift.cashier_id !== user.id)
+  useEffect(() => {
+    if (corteAjeno && location.pathname !== '/corte') navigate('/corte', { replace: true })
+  }, [corteAjeno, location.pathname]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLogout = () => {
     if (shift) {
@@ -177,7 +184,7 @@ export default function Layout() {
     }
   }
 
-  const visibleNav = navItems.filter(n => n.roles.includes(user?.role || ''))
+  const visibleNav = navItems.filter(n => n.roles.includes(user?.role || '')).filter(n => !corteAjeno || n.path === '/corte')
 
   return (
     <div className="flex h-screen" style={{ background: 'var(--nm-bg)' }}>
@@ -362,7 +369,7 @@ export default function Layout() {
                   Ya hay un turno abierto
                 </h2>
                 <p style={{ margin: '0 0 18px', fontSize: 13, fontWeight: 500, color: 'var(--nm-text-muted)', textAlign: 'center', lineHeight: 1.5 }}>
-                  No se puede abrir otro turno ni vender en él hasta que se haga el corte. Quien abrió ese turno ({otherShift.cashier_name || 'otro usuario'}) debe iniciar sesión y hacer su corte.
+                  No se puede abrir otro turno ni vender en él hasta que se haga el corte. Quien abrió ese turno ({otherShift.cashier_name || 'otro usuario'}) debe iniciar sesión y hacer su corte{user?.role === 'admin' ? ', o puedes hacerlo tú como administrador.' : ' (o un administrador).'}
                 </p>
                 <div style={{
                   width: '100%', marginBottom: 18, background: 'var(--nm-bg)', borderRadius: 12,
@@ -373,6 +380,15 @@ export default function Layout() {
                     Abierto: {otherShift.started_at} · Fondo inicial: ${Number(otherShift.opening_cash || 0).toFixed(2)}
                   </div>
                 </div>
+                {user?.role === 'admin' && (
+                  <button
+                    onClick={() => { setShift(otherShift); setOtherShift(null); navigate('/corte') }}
+                    className="nm-btn-accent"
+                    style={{ width: '100%', padding: '15px', fontSize: 15, marginBottom: 10 }}
+                  >
+                    Hacer el corte del Turno #{otherShift.id} (admin) →
+                  </button>
+                )}
                 <button onClick={handleLogout} className="nm-btn" style={{ width: '100%', padding: '14px', fontSize: 15, fontWeight: 800 }}>
                   Cerrar sesión
                 </button>

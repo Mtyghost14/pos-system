@@ -216,6 +216,7 @@ function runMigrations() {
   `)
 
   // Add cancellation columns to sales table
+  try { db.exec('ALTER TABLE shifts ADD COLUMN closed_by INTEGER') } catch { /* exists */ }
   try { db.exec('ALTER TABLE sales ADD COLUMN cancelled INTEGER DEFAULT 0') } catch { /* exists */ }
   try { db.exec('ALTER TABLE sales ADD COLUMN cancelled_at TEXT') } catch { /* exists */ }
   try { db.exec('ALTER TABLE sales ADD COLUMN cancelled_by INTEGER REFERENCES users(id)') } catch { /* exists */ }
