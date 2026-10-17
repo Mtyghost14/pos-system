@@ -289,7 +289,7 @@ export default function Sales() {
       loadCashBalance()
     } else {
       setSaleStatus('Error: ' + (res.message || 'Error al procesar venta'))
-      setTimeout(() => setSaleStatus(''), 4000)
+      setTimeout(() => setSaleStatus(''), 8000)
     }
   }
 
