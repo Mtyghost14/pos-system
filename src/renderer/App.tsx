@@ -147,6 +147,18 @@ function UpdateBanner() {
 
 function CloudBanner() {
   const [state, setState] = useState<'ok' | 'offline' | 'unset'>('ok')
+  const [retrying, setRetrying] = useState(false)
+  const [lastError, setLastError] = useState('')
+
+  const retry = async () => {
+    setRetrying(true); setLastError('')
+    try {
+      const r = await window.api.cloudReconnect()
+      setState(r.ok ? 'ok' : 'offline')
+      if (!r.ok) setLastError(r.message || 'No se pudo conectar')
+    } catch { /* ignore */ }
+    setRetrying(false)
+  }
 
   useEffect(() => {
     let alive = true
@@ -176,7 +188,22 @@ function CloudBanner() {
     }}>
       {state === 'unset'
         ? '⚙️ Sincronización con la nube sin configurar — Configuración → Sincronización'
-        : '☁️ Sin conexión con la nube — no se pueden registrar ventas ni ajustes de inventario hasta reconectar'}
+        : (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+            <span>☁️ Sin conexión con la nube — no se pueden registrar ventas ni ajustes de inventario. Reintentando sola…</span>
+            <button onClick={retry} disabled={retrying} style={{
+              background: 'rgba(255,255,255,0.22)', border: 'none', color: '#fff', borderRadius: 6,
+              padding: '4px 12px', cursor: retrying ? 'wait' : 'pointer', fontWeight: 800, fontSize: 12,
+            }}>
+              {retrying ? 'Conectando…' : 'Reintentar ahora'}
+            </button>
+            {lastError && !retrying && (
+              <span style={{ fontWeight: 600, fontSize: 11, opacity: 0.9 }}>
+                ({lastError} — revisa el internet de esta computadora)
+              </span>
+            )}
+          </span>
+        )}
     </div>
   )
 }

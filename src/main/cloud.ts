@@ -16,6 +16,28 @@ let channel: ReturnType<SupabaseClient['channel']> | null = null
 
 const CFG_KEYS = ['supabase_url', 'supabase_anon_key', 'cloud_terminal_user', 'cloud_terminal_pass'] as const
 
+// Reconexión automática: si la conexión falla (p. ej. el POS abrió antes que el WiFi,
+// o la nube tuvo un hipo), se reintenta sola cada 10 s, 20 s y luego cada 30 s.
+export const RECONNECT_DELAYS_MS = [10_000, 20_000, 30_000]
+let reconnectTimer: NodeJS.Timeout | null = null
+let reconnectAttempt = 0
+
+function scheduleReconnect() {
+  if (reconnectTimer) return
+  const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)]
+  reconnectAttempt++
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    if (ready) return
+    void reloadCloud().then(r => win?.webContents.send('cloud:status', { ready: r.ok, message: r.message }))
+  }, delay)
+}
+
+function cancelReconnect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  reconnectAttempt = 0
+}
+
 function readCfg(): Record<string, string> {
   const rows = getDb()
     .prepare(`SELECT key, value FROM settings WHERE key IN (${CFG_KEYS.map(() => '?').join(',')})`)
@@ -65,9 +87,15 @@ export async function reloadCloud(): Promise<{ ok: boolean; message?: string }> 
       email: emailFor(cfg.cloud_terminal_user),
       password: cfg.cloud_terminal_pass,
     })
-    if (error) { client = null; return { ok: false, message: `Login terminal: ${error.message}` } }
+    if (error) {
+      client = null
+      // Usuario/contraseña incorrectos es un problema de configuración: reintentar no lo arregla.
+      if (!/invalid login credentials/i.test(error.message)) scheduleReconnect()
+      return { ok: false, message: `Login terminal: ${error.message}` }
+    }
 
     ready = true
+    cancelReconnect()
     subscribeRealtime()
     void syncCatalogToLocal()
     void runCostBackfillOnce()
@@ -76,6 +104,7 @@ export async function reloadCloud(): Promise<{ ok: boolean; message?: string }> 
     return { ok: true }
   } catch (e: any) {
     client = null
+    scheduleReconnect()   // sin internet / nube caída: se reintenta solo
     return { ok: false, message: e?.message || 'Error inesperado al conectar' }
   }
 }
@@ -225,6 +254,15 @@ function registerCloudHandlers() {
   })
 
   ipcMain.handle('cloud:syncNow', () => syncCatalogToLocal())
+
+  // "Reintentar" desde el aviso rojo (cualquier usuario, sin entrar a Configuración).
+  ipcMain.handle('cloud:reconnect', async () => {
+    if (ready) return { ok: true }
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    const r = await reloadCloud()
+    win?.webContents.send('cloud:status', { ready: r.ok, message: r.message })
+    return r
+  })
 
   // ─── Pedidos de globos (calendario) — proxy al cliente de la nube ──────────
   const needCloud = () => { if (!ready || !client) throw new Error('Sin conexión con la nube') }
