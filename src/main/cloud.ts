@@ -7,7 +7,7 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import WS from 'ws'
 import { getDb } from './database'
-import { callWithRetry, isGatewayTransient, CLOUD_BUSY_MESSAGE } from './cloud-retry'
+import { callWithRetry, isGatewayTransient, isClockSkew, CLOUD_BUSY_MESSAGE, CLOCK_SKEW_MESSAGE } from './cloud-retry'
 
 let client: SupabaseClient | null = null
 let ready = false
@@ -60,6 +60,7 @@ export async function cloudRpc<T = any>(fn: string, args: Record<string, any>): 
   const r = await callWithRetry(() => c.rpc(fn, args) as any, fn)
   if (r.error) {
     if (isGatewayTransient(r)) throw new Error(CLOUD_BUSY_MESSAGE)
+    if (isClockSkew(r)) throw new Error(CLOCK_SKEW_MESSAGE)
     throw new Error(r.error.message)
   }
   return r.data as T

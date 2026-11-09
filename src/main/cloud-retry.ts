@@ -26,6 +26,9 @@ export type RpcResult = {
   status?: number
 }
 
+export const CLOCK_SKEW_MESSAGE =
+  'La nube tiene un desfase de hora y rechazó la sesión. Espera un minuto y vuelve a intentar — el carrito se conserva.'
+
 export const CLOUD_BUSY_MESSAGE =
   'La nube no está respondiendo en este momento. Espera unos segundos y vuelve a intentar — el carrito se conserva.'
 
@@ -34,6 +37,15 @@ export function isGatewayTransient(r: RpcResult): boolean {
   const e = r.error
   if (!e) return false
   return e.code === 'PGRST002' || /schema cache/i.test(e.message || '') || [502, 503, 504].includes(r.status ?? 0)
+}
+
+/**
+ * El token de sesión llegó "del futuro" según el reloj del servidor de Supabase
+ * (desfase de reloj en su infraestructura). La petición fue rechazada sin
+ * ejecutarse; a los pocos segundos el reloj del servidor alcanza al token y pasa.
+ */
+export function isClockSkew(r: RpcResult): boolean {
+  return !!r.error && /issued at future|iat.*future|not yet valid/i.test(r.error.message || '')
 }
 
 /** Falló la conexión: no se sabe si la petición llegó a ejecutarse. */
@@ -47,16 +59,25 @@ export function isNetworkFailure(r: RpcResult): boolean {
 export async function callWithRetry(
   call: () => PromiseLike<RpcResult>,
   fn: string,
-  opts: { delaysMs?: number[]; sleep?: (ms: number) => Promise<void> } = {},
+  opts: { delaysMs?: number[]; skewDelaysMs?: number[]; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<RpcResult & { attempts: number }> {
   const delays = opts.delaysMs ?? [1000, 2000, 4000]         // hasta 4 intentos, ~7 s de espera en total
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+  // Desfase de reloj: esperas más largas (~30 s en total) para que el servidor alcance al token.
+  const skewDelays = opts.skewDelaysMs ?? [2000, 4000, 8000, 16000]
   let attempts = 0
+  let skewAttempts = 0
   for (;;) {
     const r = await call()
     attempts++
+    if (!r.error) return { ...r, attempts }
+    if (isClockSkew(r)) {
+      if (skewAttempts >= skewDelays.length) return { ...r, attempts }
+      await sleep(skewDelays[skewAttempts++])
+      continue
+    }
     const retriable = isGatewayTransient(r) || (IDEMPOTENT_RPCS.has(fn) && isNetworkFailure(r))
-    if (!r.error || !retriable || attempts > delays.length) return { ...r, attempts }
+    if (!retriable || attempts > delays.length) return { ...r, attempts }
     await sleep(delays[attempts - 1])
   }
 }
