@@ -32,11 +32,33 @@ export const CLOCK_SKEW_MESSAGE =
 export const CLOUD_BUSY_MESSAGE =
   'La nube no está respondiendo en este momento. Espera unos segundos y vuelve a intentar — el carrito se conserva.'
 
-/** El gateway/PostgREST no pudo atender (caché de esquema, 502/503/504): la petición NO se ejecutó. */
-export function isGatewayTransient(r: RpcResult): boolean {
+/** PostgREST no pudo atender (caché de esquema / 503): la petición NO se ejecutó → reintentar es seguro siempre. */
+export function isNotExecuted(r: RpcResult): boolean {
   const e = r.error
   if (!e) return false
-  return e.code === 'PGRST002' || /schema cache/i.test(e.message || '') || [502, 503, 504].includes(r.status ?? 0)
+  return e.code === 'PGRST002' || e.code === 'PGRST003' || /schema cache|connection pool/i.test(e.message || '') || r.status === 503
+}
+
+/** 502/504: el gateway se cansó de esperar, pero la base PUDO haberlo ejecutado → solo reintentar lo idempotente. */
+export function isMaybeExecuted(r: RpcResult): boolean {
+  return !!r.error && [502, 504, 520, 522, 524].includes(r.status ?? 0)
+}
+
+/** Cualquier falla momentánea del servicio (para el mensaje al usuario). */
+export function isGatewayTransient(r: RpcResult): boolean {
+  return isNotExecuted(r) || isMaybeExecuted(r)
+}
+
+/**
+ * La sesión con la nube murió (token vencido/rechazado, o la sesión se perdió y la
+ * petición salió como anónima → "permission denied"). Se arregla volviendo a iniciar sesión.
+ */
+export function isAuthFailure(r: RpcResult): boolean {
+  const e = r.error
+  if (!e) return false
+  if (isClockSkew(r)) return false
+  return r.status === 401 || ['PGRST301', 'PGRST302', '42501'].includes(e.code || '') ||
+    /jwt expired|invalid jwt|jwt.*(invalid|malformed)|permission denied for (function|table|schema)/i.test(e.message || '')
 }
 
 /**
@@ -53,7 +75,7 @@ export function isNetworkFailure(r: RpcResult): boolean {
   const e = r.error
   if (!e) return false
   return (r.status === 0 || r.status === undefined) &&
-    /fetch failed|network|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|timeout/i.test(e.message || '')
+    /fetch failed|network|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|timeout|abort/i.test(e.message || '')
 }
 
 export async function callWithRetry(
@@ -76,7 +98,8 @@ export async function callWithRetry(
       await sleep(skewDelays[skewAttempts++])
       continue
     }
-    const retriable = isGatewayTransient(r) || (IDEMPOTENT_RPCS.has(fn) && isNetworkFailure(r))
+    const retriable = isNotExecuted(r) ||
+      (IDEMPOTENT_RPCS.has(fn) && (isMaybeExecuted(r) || isNetworkFailure(r)))
     if (!retriable || attempts > delays.length) return { ...r, attempts }
     await sleep(delays[attempts - 1])
   }

@@ -7,7 +7,8 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 import WS from 'ws'
 import { getDb } from './database'
-import { callWithRetry, isGatewayTransient, isClockSkew, CLOUD_BUSY_MESSAGE, CLOCK_SKEW_MESSAGE } from './cloud-retry'
+import { isAdminSession, NOT_ADMIN } from './session'
+import { callWithRetry, isGatewayTransient, isClockSkew, isAuthFailure, CLOUD_BUSY_MESSAGE, CLOCK_SKEW_MESSAGE } from './cloud-retry'
 
 let client: SupabaseClient | null = null
 let ready = false
@@ -15,6 +16,21 @@ let win: BrowserWindow | null = null
 let channel: ReturnType<SupabaseClient['channel']> | null = null
 
 const CFG_KEYS = ['supabase_url', 'supabase_anon_key', 'cloud_terminal_user', 'cloud_terminal_pass'] as const
+
+// Ninguna solicitud a la nube puede quedarse "pensando" más de esto (antes: hasta 5 min).
+export const REQUEST_TIMEOUT_MS = 20_000
+
+/** fetch con tiempo límite; respeta además la señal de cancelación que traiga la librería. */
+function timedFetch(input: any, init: any = {}): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout: la nube no respondió a tiempo')), REQUEST_TIMEOUT_MS)
+  const outer: AbortSignal | undefined = init?.signal
+  if (outer) {
+    if (outer.aborted) ctrl.abort(outer.reason)
+    else outer.addEventListener('abort', () => ctrl.abort(outer.reason), { once: true })
+  }
+  return fetch(input, { ...init, signal: ctrl.signal }).finally(() => clearTimeout(timer))
+}
 
 // Reconexión automática: si la conexión falla (p. ej. el POS abrió antes que el WiFi,
 // o la nube tuvo un hipo), se reintenta sola cada 10 s, 20 s y luego cada 30 s.
@@ -38,6 +54,20 @@ function cancelReconnect() {
   reconnectAttempt = 0
 }
 
+/**
+ * La sesión murió (token vencido que no se pudo renovar tras dormir la PC o caerse el
+ * WiFi; desde entonces todo sale como anónimo y la nube responde "permission denied").
+ * Antes el POS no se daba cuenta: seguía "conectado", nada funcionaba y no salía aviso.
+ * Ahora se marca desconectado (aparece el aviso rojo) y se vuelve a iniciar sesión solo.
+ */
+function markSessionDead(reason: string) {
+  if (!ready) return
+  console.warn('[cloud] sesión perdida:', reason)
+  ready = false
+  win?.webContents.send('cloud:status', { ready: false, message: 'Se perdió la sesión con la nube; reconectando…' })
+  scheduleReconnect()
+}
+
 function readCfg(): Record<string, string> {
   const rows = getDb()
     .prepare(`SELECT key, value FROM settings WHERE key IN (${CFG_KEYS.map(() => '?').join(',')})`)
@@ -55,53 +85,89 @@ export function getCloudClient(): SupabaseClient | null { return ready ? client 
 /** Llama a un RPC de la nube. Lanza si no hay conexión o si el RPC devuelve error. */
 export async function cloudRpc<T = any>(fn: string, args: Record<string, any>): Promise<T> {
   if (!ready || !client) throw new Error('Sin conexión con la nube')
-  const c = client
+  let c = client
   // Reintenta solo cuando el servicio está momentáneamente caído (ver cloud-retry.ts).
-  const r = await callWithRetry(() => c.rpc(fn, args) as any, fn)
+  let r = await callWithRetry(() => c.rpc(fn, args) as any, fn)
+
+  // Sesión muerta: la petición fue rechazada SIN ejecutarse → re-login y un reintento.
+  if (r.error && isAuthFailure(r)) {
+    markSessionDead(`${fn}: ${r.error.message}`)
+    const re = await reloadCloud()
+    win?.webContents.send('cloud:status', { ready: re.ok, message: re.message })
+    if (!re.ok || !client) throw new Error('Se perdió la sesión con la nube y no se pudo reconectar. Revisa el internet e intenta de nuevo.')
+    c = client
+    r = await callWithRetry(() => c.rpc(fn, args) as any, fn)
+  }
+
   if (r.error) {
     if (isGatewayTransient(r)) throw new Error(CLOUD_BUSY_MESSAGE)
     if (isClockSkew(r)) throw new Error(CLOCK_SKEW_MESSAGE)
+    if (isAuthFailure(r)) markSessionDead(`${fn}: ${r.error.message}`)
     throw new Error(r.error.message)
   }
   return r.data as T
 }
 
+/** ¿La nube ya tiene esta venta? (para no cobrar doble si la respuesta se perdió en el camino) */
+export async function cloudSaleExists(folio: string): Promise<boolean> {
+  if (!ready || !client) return false
+  try {
+    const { data, error } = await client.from('sales_mirror').select('folio').eq('folio', folio).maybeSingle()
+    return !error && !!data
+  } catch { return false }
+}
+
 /** (Re)crea el cliente, inicia sesión como "terminal" y abre el canal realtime. */
 export async function reloadCloud(): Promise<{ ok: boolean; message?: string }> {
   ready = false
-  try { if (channel) { await client?.removeChannel(channel) } } catch { /* ignore */ }
+  // Cerrar el cliente anterior por completo (antes quedaba vivo renovando sesión y con su canal abierto).
+  const old = client
+  client = null
   channel = null
+  if (old) {
+    try { await old.removeAllChannels() } catch { /* ignore */ }
+    try { await old.auth.stopAutoRefresh() } catch { /* ignore */ }
+    try { await old.auth.signOut({ scope: 'local' }) } catch { /* ignore */ }
+  }
 
   const cfg = readCfg()
   if (!cfg.supabase_url || !cfg.supabase_anon_key || !cfg.cloud_terminal_user || !cfg.cloud_terminal_pass) {
-    client = null
     return { ok: false, message: 'Faltan datos de conexión (URL, llave o usuario/contraseña terminal).' }
   }
 
   try {
-    client = createClient(cfg.supabase_url, cfg.supabase_anon_key, {
+    const c = createClient(cfg.supabase_url, cfg.supabase_anon_key, {
       auth: { persistSession: false, autoRefreshToken: true },
+      global: { fetch: timedFetch as any },
       // Electron main (Node) has no global WebSocket — supply `ws` for realtime.
       realtime: { transport: WS as unknown as typeof WebSocket },
     })
-    const { error } = await client.auth.signInWithPassword({
+    const { error } = await c.auth.signInWithPassword({
       email: emailFor(cfg.cloud_terminal_user),
       password: cfg.cloud_terminal_pass,
     })
     if (error) {
-      client = null
+      try { await c.auth.stopAutoRefresh() } catch { /* ignore */ }
       // Usuario/contraseña incorrectos es un problema de configuración: reintentar no lo arregla.
       if (!/invalid login credentials/i.test(error.message)) scheduleReconnect()
       return { ok: false, message: `Login terminal: ${error.message}` }
     }
 
+    client = c
+    // Si la librería da la sesión por terminada (no pudo renovarla), reconectar.
+    c.auth.onAuthStateChange((event, session) => {
+      if (c !== client) return
+      if (event === 'SIGNED_OUT' || (event === 'TOKEN_REFRESHED' && !session)) markSessionDead(`auth: ${event}`)
+    })
+
     ready = true
     cancelReconnect()
     subscribeRealtime()
-    void syncCatalogToLocal()
+    void syncCatalogToLocal({ full: true })
     void runCostBackfillOnce()
     if (periodicTimer) clearInterval(periodicTimer)
-    periodicTimer = setInterval(() => { if (ready) void syncCatalogToLocal() }, 60_000)
+    tick = 0
+    periodicTimer = setInterval(() => { void periodicCheck() }, 60_000)
     return { ok: true }
   } catch (e: any) {
     client = null
@@ -110,13 +176,25 @@ export async function reloadCloud(): Promise<{ ok: boolean; message?: string }> 
   }
 }
 
+/** Cada minuto: revisar que la sesión siga viva y traer lo que cambió del catálogo. Cada 10 min, todo. */
+let tick = 0
+async function periodicCheck() {
+  if (!ready || !client) return
+  tick++
+  try {
+    const { data } = await client.auth.getSession()
+    if (!data.session) { markSessionDead('getSession vacío'); return }
+  } catch { /* falla de red: el sync de abajo lo reportará */ }
+  await syncCatalogToLocal({ full: tick % 10 === 0 })
+}
+
 function subscribeRealtime() {
   if (!client || !win) return
   channel = client
     .channel('pos-inventory')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, payload => {
       win?.webContents.send('cloud:changed', { table: 'products', new: payload.new, old: payload.old })
-      scheduleSync()
+      requestCatalogSync()
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory_movements' }, payload => {
       win?.webContents.send('cloud:changed', { table: 'inventory_movements', new: payload.new })
@@ -129,39 +207,83 @@ function subscribeRealtime() {
 // ─── Cache local del catálogo ───────────────────────────────────────────────
 // La nube es la fuente de verdad; el POS mantiene una copia local de
 // categories / products / product_barcodes para leer rápido y offline.
-// Se refresca al conectar, cada 60 s, y ante cualquier cambio realtime.
+//   · Completa (todo, paginado): al conectar, cada 10 min y tras cambios hechos desde el POS.
+//   · Incremental (solo productos que cambiaron): cada minuto y ante avisos realtime.
+// Antes se bajaba TODO cada minuto (≈5 GB/mes, el límite del plan gratis) y sin paginar:
+// al pasar de 1000 productos el resto se habría marcado inactivo y no se podría vender.
 
 let syncTimer: NodeJS.Timeout | null = null
 let periodicTimer: NodeJS.Timeout | null = null
 let syncing = false
+let watermark: string | null = null   // updated_at más reciente visto en la nube
 
-function scheduleSync(delayMs = 400) {
+const PAGE = 1000
+
+/** Debounce: muchos cambios seguidos (p. ej. una recepción grande) → una sola sincronización. */
+export function requestCatalogSync(delayMs = 1500) {
   if (syncTimer) clearTimeout(syncTimer)
-  syncTimer = setTimeout(() => { void syncCatalogToLocal() }, delayMs)
+  syncTimer = setTimeout(() => { syncTimer = null; void syncCatalogToLocal({ full: false }) }, delayMs)
 }
 
-export async function syncCatalogToLocal(): Promise<{ ok: boolean; message?: string; products?: number }> {
+class CloudReadError extends Error {
+  constructor(public result: any) { super(result?.error?.message || 'Error al leer la nube') }
+}
+
+/** Lee una tabla completa por páginas (la nube entrega máximo 1000 filas por consulta). */
+async function fetchAll(table: string, columns: string, filter?: (q: any) => any): Promise<any[]> {
+  const out: any[] = []
+  let expected: number | null = null
+  for (let from = 0; ; from += PAGE) {
+    let q: any = client!.from(table).select(columns, from === 0 ? { count: 'exact' } : undefined)
+    if (filter) q = filter(q)
+    const res = await q.order('id').range(from, from + PAGE - 1)
+    if (res.error) throw new CloudReadError(res)
+    if (from === 0) expected = res.count ?? null
+    out.push(...(res.data || []))
+    if (!res.data || res.data.length < PAGE) break
+  }
+  // Nunca tomar una lista incompleta como "el catálogo entero".
+  if (expected != null && out.length < expected) {
+    throw new Error(`Lectura incompleta de ${table}: ${out.length} de ${expected}`)
+  }
+  return out
+}
+
+export async function syncCatalogToLocal(opts: { full?: boolean } = {}): Promise<{ ok: boolean; message?: string; products?: number }> {
+  const full = opts.full ?? true
   if (!ready || !client) return { ok: false, message: 'Sin conexión con la nube' }
-  if (syncing) return { ok: true }
+  if (syncing) {
+    if (full) setTimeout(() => { void syncCatalogToLocal({ full: true }) }, 2000)
+    return { ok: true }
+  }
   syncing = true
   try {
-    const [cats, prods, bcs] = await Promise.all([
-      client.from('categories').select('id,name'),
-      client.from('products').select('id,code,name,category_id,cost,price,stock,min_stock,active'),
-      client.from('product_barcodes').select('id,product_id,code,label'),
-    ])
-    const err = cats.error || prods.error || bcs.error
-    if (err) return { ok: false, message: err.message }
+    const PROD_COLS = 'id,code,name,category_id,cost,price,stock,min_stock,active,updated_at'
+    let cats: any[] = [], prods: any[] = [], bcs: any[] = []
+    if (full || !watermark) {
+      ;[cats, prods, bcs] = await Promise.all([
+        fetchAll('categories', 'id,name'),
+        fetchAll('products', PROD_COLS),
+        fetchAll('product_barcodes', 'id,product_id,code,label'),
+      ])
+    } else {
+      // Margen de 60 s: atrapa transacciones que terminaron un poco después de su hora.
+      const since = new Date(new Date(watermark).getTime() - 60_000).toISOString()
+      prods = await fetchAll('products', PROD_COLS, q => q.gte('updated_at', since))
+    }
+    const isFull = full || !watermark
 
     const db = getDb()
     // Upsert por clave natural (code / name) conservando el id local (los renglones
     // de venta históricos lo referencian). `cloud_id` mapea al id de la nube.
     const tx = db.transaction(() => {
-      const upCat = db.prepare(`INSERT INTO categories (name, cloud_id) VALUES (?, ?)
-        ON CONFLICT(name) DO UPDATE SET cloud_id = excluded.cloud_id`)
-      for (const c of cats.data as any[]) upCat.run(c.name, c.id)
+      if (isFull) {
+        const upCat = db.prepare(`INSERT INTO categories (name, cloud_id) VALUES (?, ?)
+          ON CONFLICT(name) DO UPDATE SET cloud_id = excluded.cloud_id`)
+        for (const c of cats) upCat.run(c.name, c.id)
+        db.prepare('UPDATE products SET active = 0 WHERE cloud_id IS NOT NULL').run()
+      }
 
-      db.prepare('UPDATE products SET active = 0 WHERE cloud_id IS NOT NULL').run()
       const upProd = db.prepare(`INSERT INTO products
           (code, name, category_id, cost, price, stock, min_stock, active, cloud_id, updated_at)
           VALUES (@code, @name,
@@ -172,24 +294,34 @@ export async function syncCatalogToLocal(): Promise<{ ok: boolean; message?: str
             cost = excluded.cost, price = excluded.price, stock = excluded.stock,
             min_stock = excluded.min_stock, active = excluded.active,
             cloud_id = excluded.cloud_id, updated_at = excluded.updated_at`)
-      for (const p of prods.data as any[]) upProd.run({
+      for (const p of prods) upProd.run({
         code: String(p.code), name: p.name, cat: p.category_id,
         cost: p.cost ?? 0, price: p.price ?? 0, stock: p.stock ?? 0, min_stock: p.min_stock ?? 0,
         active: p.active ? 1 : 0, cid: p.id,
       })
 
-      db.prepare('DELETE FROM product_barcodes WHERE cloud_id IS NOT NULL').run()
-      const upBc = db.prepare(`INSERT INTO product_barcodes (product_id, code, label, cloud_id)
-          VALUES ((SELECT id FROM products WHERE cloud_id = ?), ?, ?, ?)
-          ON CONFLICT(code) DO UPDATE SET
-            product_id = excluded.product_id, label = excluded.label, cloud_id = excluded.cloud_id`)
-      for (const b of bcs.data as any[]) upBc.run(b.product_id, String(b.code), b.label ?? null, b.id)
+      if (isFull) {
+        db.prepare('DELETE FROM product_barcodes WHERE cloud_id IS NOT NULL').run()
+        // Solo códigos cuyo producto existe localmente (antes uno huérfano tumbaba toda la sincronización).
+        const upBc = db.prepare(`INSERT INTO product_barcodes (product_id, code, label, cloud_id)
+            SELECT p.id, ?, ?, ? FROM products p WHERE p.cloud_id = ?
+            ON CONFLICT(code) DO UPDATE SET
+              product_id = excluded.product_id, label = excluded.label, cloud_id = excluded.cloud_id`)
+        for (const b of bcs) upBc.run(String(b.code), b.label ?? null, b.id, b.product_id)
+      }
     })
     tx()
 
-    win?.webContents.send('cloud:catalog-synced', { products: (prods.data as any[]).length })
-    return { ok: true, products: (prods.data as any[]).length }
+    for (const p of prods) if (p.updated_at && (!watermark || p.updated_at > watermark)) watermark = p.updated_at
+
+    if (isFull || prods.length > 0) {
+      const total = isFull ? prods.length
+        : (db.prepare('SELECT COUNT(*) AS c FROM products WHERE active = 1').get() as any).c
+      win?.webContents.send('cloud:catalog-synced', { products: total })
+    }
+    return { ok: true, products: prods.length }
   } catch (e: any) {
+    if (e instanceof CloudReadError && isAuthFailure(e.result)) markSessionDead(`sync: ${e.message}`)
     return { ok: false, message: e?.message || 'Error al sincronizar catálogo' }
   } finally {
     syncing = false
@@ -258,7 +390,7 @@ function registerCloudHandlers() {
 
   // "Reintentar" desde el aviso rojo (cualquier usuario, sin entrar a Configuración).
   ipcMain.handle('cloud:reconnect', async () => {
-    if (ready) return { ok: true }
+    // Siempre re-inicia sesión (aunque se crea conectado: la sesión pudo haber muerto en silencio).
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
     const r = await reloadCloud()
     win?.webContents.send('cloud:status', { ready: r.ok, message: r.message })
@@ -337,6 +469,7 @@ function registerCloudHandlers() {
 
   // Guarda credenciales y reconecta; devuelve un conteo de productos como prueba real.
   ipcMain.handle('cloud:test', async () => {
+    if (!isAdminSession()) return NOT_ADMIN
     const r = await reloadCloud()
     if (!r.ok) return r
     const { count, error } = await client!.from('products').select('*', { count: 'exact', head: true })
@@ -346,6 +479,7 @@ function registerCloudHandlers() {
 
   // Migración única: sube el catálogo local que aún no exista en la nube.
   ipcMain.handle('cloud:migrateCatalog', async () => {
+    if (!isAdminSession()) return NOT_ADMIN
     if (!ready || !client) {
       const r = await reloadCloud()
       if (!r.ok) return { ok: false, message: r.message }

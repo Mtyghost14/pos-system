@@ -14,5 +14,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   shift: null,
   setUser: (user) => set({ user }),
   setShift: (shift) => set({ shift }),
-  logout: () => set({ user: null, shift: null }),
+  logout: () => {
+    try { void window.api.logout() } catch { /* ignore */ }   // el proceso principal también olvida la sesión
+    set({ user: null, shift: null })
+  },
 }))

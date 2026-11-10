@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron'
 import { join } from 'path'
 import { initDatabase } from './database'
 import { registerIpcHandlers } from './ipc-handlers'
@@ -40,6 +40,29 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
+  })
+
+  // ── Blindaje de la ventana (solo en la app instalada) ──────────────────────
+  // Sin herramientas de desarrollador: con ellas cualquier usuario podía llamar
+  // funciones internas del POS saltándose las pantallas.
+  if (app.isPackaged) {
+    if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+    mainWindow.webContents.on('devtools-opened', () => mainWindow?.webContents.closeDevTools())
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      const k = (input.key || '').toLowerCase()
+      const mod = input.control || input.meta
+      if (k === 'f12' || (mod && input.shift && ['i', 'j', 'c'].includes(k)) || (mod && input.alt && k === 'i')) {
+        event.preventDefault()
+      }
+    })
+  }
+  // La ventana del POS nunca navega fuera de la app; los enlaces externos se abren en el navegador.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://') && !url.startsWith('http://localhost:5173')) event.preventDefault()
+  })
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//i.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
   })
 
   mainWindow.on('close', (e) => {

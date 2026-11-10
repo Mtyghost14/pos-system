@@ -1,9 +1,10 @@
 import { ipcMain, dialog, app, BrowserWindow } from 'electron'
 import { getDb, checkpointDb, closeDb } from './database'
-import { isCloudReady, getCloudClient, cloudRpc, syncCatalogToLocal } from './cloud'
+import { isCloudReady, getCloudClient, cloudRpc, syncCatalogToLocal, requestCatalogSync, cloudSaleExists } from './cloud'
 import { registerReceiveHandlers } from './receive'
+import { setSessionUser, isAdminSession, NOT_ADMIN } from './session'
 import bcrypt from 'bcryptjs'
-import { join } from 'path'
+import { join, basename } from 'path'
 import { readFileSync, writeFileSync, readdirSync, unlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { exec } from 'child_process'
@@ -28,15 +29,21 @@ export function registerIpcHandlers() {
     if (!user) return { success: false, message: 'Usuario no encontrado' }
     const valid = bcrypt.compareSync(password, user.password_hash)
     if (!valid) return { success: false, message: 'Contraseña incorrecta' }
-    const { password_hash, ...safeUser } = user
+    const { password_hash, plain_password, ...safeUser } = user
+    setSessionUser({ id: user.id, role: user.role, name: user.name })
     return { success: true, user: safeUser }
   })
 
+  ipcMain.handle('auth:logout', () => { setSessionUser(null); return { success: true } })
+
   ipcMain.handle('auth:getUsers', () => {
+    // Las contraseñas visibles solo se entregan a un administrador con sesión abierta.
+    if (!isAdminSession()) return db.prepare('SELECT id, username, role, name, active, created_at FROM users ORDER BY name').all()
     return db.prepare('SELECT id, username, plain_password, role, name, active, created_at FROM users ORDER BY name').all()
   })
 
   ipcMain.handle('auth:createUser', (_, data: any) => {
+    if (!isAdminSession()) return NOT_ADMIN
     const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(data.username)
     if (exists) return { success: false, message: 'El nombre de usuario ya existe' }
     const hash = bcrypt.hashSync(data.password, 10)
@@ -47,6 +54,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('auth:updateUser', (_, data: any) => {
+    if (!isAdminSession()) return NOT_ADMIN
     if (data.password) {
       const hash = bcrypt.hashSync(data.password, 10)
       db.prepare('UPDATE users SET username=?, password_hash=?, plain_password=?, role=?, name=?, active=? WHERE id=?').run(
@@ -61,6 +69,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('auth:deleteUser', (_, id: number) => {
+    if (!isAdminSession()) return NOT_ADMIN
     db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(id)
     return { success: true }
   })
@@ -139,7 +148,9 @@ export function registerIpcHandlers() {
     if (!product) return null
 
     // check promotions
-    const now = new Date().toISOString().slice(0, 10)
+    // Fecha local (antes era UTC: las promociones cambiaban de día a las 6 pm)
+    const d0 = new Date()
+    const now = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')}`
     const promo = db.prepare(`
       SELECT * FROM promotions
       WHERE product_id = ? AND active = 1
@@ -147,11 +158,11 @@ export function registerIpcHandlers() {
       LIMIT 1
     `).get(product.id, now, now) as any
     if (promo) {
-      if (promo.discount_type === 'percentage') {
-        product.promo_price = product.price * (1 - promo.discount_value / 100)
-      } else {
-        product.promo_price = product.price - promo.discount_value
-      }
+      const raw = promo.discount_type === 'percentage'
+        ? product.price * (1 - promo.discount_value / 100)
+        : product.price - promo.discount_value
+      // Nunca negativo y redondeado a centavos (antes podía dar ventas negativas o fracciones de centavo).
+      product.promo_price = Math.max(0, Math.round(raw * 100) / 100)
       product.promo_name = promo.name
     }
     return product
@@ -219,6 +230,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('products:import', async (_, rows: any[]) => {
+    if (!isAdminSession()) return NOT_ADMIN
     if (!isCloudReady()) return { success: false, message: 'Sin conexión con la nube' }
     let imported = 0, updated = 0
     const errors: string[] = []
@@ -461,7 +473,11 @@ export function registerIpcHandlers() {
         })),
       } })
     } catch (e: any) {
-      return { success: false, message: e?.message || 'La nube rechazó la venta' }
+      // ¿La nube sí la guardó y solo se perdió la respuesta? Entonces NO es un error:
+      // seguir con el registro local (si no, la cajera cobraría dos veces).
+      if (!(await cloudSaleExists(folio))) {
+        return { success: false, message: e?.message || 'La nube rechazó la venta' }
+      }
     }
 
     // 2) Local: lado dinero (sin tocar stock ni inventory_movements — eso vive en la nube)
@@ -493,7 +509,7 @@ export function registerIpcHandlers() {
       return { success: false, message: 'Error al guardar la venta: ' + (e?.message || '') }
     }
 
-    void syncCatalogToLocal()
+    requestCatalogSync()   // incremental y agrupado (antes: catálogo completo tras cada venta)
     return { success: true, folio, id: saleId }
   })
 
@@ -589,7 +605,7 @@ export function registerIpcHandlers() {
       return { success: false, message: err.message }
     }
 
-    void syncCatalogToLocal()
+    requestCatalogSync()   // incremental y agrupado (antes: catálogo completo tras cada venta)
     return { success: true }
   })
 
@@ -701,7 +717,8 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('promotions:getActiveForProduct', (_, productId: number) => {
-    const now = new Date().toISOString().slice(0, 10)
+    const d0 = new Date()
+    const now = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')}`
     return db.prepare(`
       SELECT * FROM promotions WHERE product_id = ? AND active = 1
       AND start_date <= ? AND end_date >= ?
@@ -1033,10 +1050,13 @@ export function registerIpcHandlers() {
   // ─── SETTINGS ───────────────────────────────────────────────────────────────
   ipcMain.handle('settings:get', () => {
     const rows = db.prepare('SELECT key, value FROM settings').all() as any[]
-    return Object.fromEntries(rows.map(r => [r.key, r.value]))
+    const all = Object.fromEntries(rows.map(r => [r.key, r.value]))
+    if (!isAdminSession()) delete all.cloud_terminal_pass   // contraseña de la nube: solo admin
+    return all
   })
 
   ipcMain.handle('settings:save', (_, data: any) => {
+    if (!isAdminSession()) return NOT_ADMIN
     const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
     for (const [key, value] of Object.entries(data)) {
       stmt.run(key, value as string)
@@ -1399,6 +1419,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('excel:readFile', async (_, filePath: string) => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       const workbook = new ExcelJS.Workbook()
       await workbook.xlsx.readFile(filePath)
@@ -1433,6 +1454,7 @@ export function registerIpcHandlers() {
 
   // ─── BACKUP ─────────────────────────────────────────────────────────────────
   ipcMain.handle('backup:create', () => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       const userDataPath = app.getPath('userData')
       const backupsDir = join(userDataPath, 'backups')
@@ -1452,6 +1474,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('backup:list', () => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       const userDataPath = app.getPath('userData')
       const backupsDir = join(userDataPath, 'backups')
@@ -1467,10 +1490,11 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('backup:restore', async (_e, filename: string) => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       const { copyFileSync, existsSync, rmSync } = require('fs')
       const userDataPath = app.getPath('userData')
-      const backupPath = join(userDataPath, 'backups', filename)
+      const backupPath = join(userDataPath, 'backups', basename(String(filename)))  // sin '../'
       const dbPath = join(userDataPath, 'pos.db')
       if (!existsSync(backupPath)) return { success: false, message: 'Archivo no encontrado' }
 
@@ -1502,11 +1526,12 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('backup:export', async (_e, filename: string) => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       const { dialog } = require('electron')
       const { copyFileSync, existsSync } = require('fs')
       const userDataPath = app.getPath('userData')
-      const backupPath = join(userDataPath, 'backups', filename)
+      const backupPath = join(userDataPath, 'backups', basename(String(filename)))  // sin '../'
       if (!existsSync(backupPath)) return { success: false, message: 'Archivo no encontrado' }
       const { filePath } = await dialog.showSaveDialog({
         title: 'Exportar respaldo',
@@ -1522,6 +1547,7 @@ export function registerIpcHandlers() {
   })
 
   ipcMain.handle('backup:import', async () => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       const { dialog } = require('electron')
       const { copyFileSync, mkdirSync, existsSync } = require('fs')
@@ -1653,7 +1679,24 @@ function buildReceiptESCPOS(data: any): Buffer {
   return Buffer.concat(parts)
 }
 
+// Escapa todo el texto que llega a los tickets HTML (nombres de productos, tienda, cajero…).
+// Un nombre como "<img src=x onerror=…>" ya no puede ejecutar código en la ventana de impresión.
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+function escapeDeep<T>(v: T): T {
+  if (typeof v === 'string') return escapeHtml(v) as any
+  if (Array.isArray(v)) return v.map(escapeDeep) as any
+  if (v && typeof v === 'object' && !(v instanceof Date)) {
+    const out: any = {}
+    for (const [k, x] of Object.entries(v as any)) out[k] = escapeDeep(x)
+    return out
+  }
+  return v
+}
+
 function buildReceiptHTML(data: any): string {
+  data = escapeDeep(data)
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 
   // Font size scaling
@@ -2024,6 +2067,7 @@ function buildDailyCorteESCPOS(data: any, stored: any): Buffer {
 }
 
 function buildShiftHTML(data: any): string {
+  data = escapeDeep(data)
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 
   const sizeKey = data.receipt_font_size || 'medium'
@@ -2147,6 +2191,7 @@ function buildShiftHTML(data: any): string {
 }
 
 function buildShiftOpenHTML(data: any): string {
+  data = escapeDeep(data)
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
 
   const sizeKey = data.receipt_font_size || 'medium'
@@ -2236,6 +2281,8 @@ function buildShiftPrintData(data: any): any[] {
 }
 
 function buildDailyCorteHTML(data: any, stored: any): string {
+  data = escapeDeep(data)
+  stored = escapeDeep(stored)
   const fmt = (n: number) => `$${(n || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
   const sizeKey = stored.receipt_font_size || 'medium'
   const fontBase = sizeKey === 'small' ? 23 : sizeKey === 'large' ? 29 : 26

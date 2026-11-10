@@ -4,6 +4,7 @@ const api = {
   // Auth
   login: (username: string, password: string) =>
     ipcRenderer.invoke('auth:login', username, password),
+  logout: () => ipcRenderer.invoke('auth:logout'),
   getUsers: () => ipcRenderer.invoke('auth:getUsers'),
   createUser: (data: any) => ipcRenderer.invoke('auth:createUser', data),
   updateUser: (data: any) => ipcRenderer.invoke('auth:updateUser', data),

@@ -8,6 +8,7 @@
 import { ipcMain } from 'electron'
 import { basename } from 'path'
 import { getCloudClient, cloudRpc, isCloudReady, syncCatalogToLocal } from './cloud'
+import { isAdminSession, NOT_ADMIN } from './session'
 
 type RecvInput = {
   code: any; quantity: any; name?: any; price?: any; cost?: any; category?: any; min_stock?: any; row?: number
@@ -59,7 +60,7 @@ async function fetchAll(table: string, columns: string): Promise<any[]> {
   const out: any[] = []
   const page = 1000
   for (let from = 0; ; from += page) {
-    const { data, error } = await client.from(table).select(columns).range(from, from + page - 1)
+    const { data, error } = await client.from(table).select(columns).order('id').range(from, from + page - 1)
     if (error) throw new Error(`No se pudo leer ${table}: ${error.message}`)
     out.push(...(data || []))
     if (!data || data.length < page) break
@@ -182,6 +183,7 @@ async function wasImportedBefore(fileName: string) {
 export function registerReceiveHandlers() {
   // Vista previa: no modifica nada.
   ipcMain.handle('products:receivePreview', async (_e, rows: RecvInput[], filePath: string) => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       if (!isCloudReady()) return { success: false, message: 'Sin conexión con la nube' }
       const fileName = basename(filePath || 'archivo.xlsx')
@@ -195,6 +197,7 @@ export function registerReceiveHandlers() {
 
   // Aplica: suma al inventario.
   ipcMain.handle('products:receive', async (_e, rows: RecvInput[], filePath: string, userName: string) => {
+    if (!isAdminSession()) return NOT_ADMIN
     try {
       if (!isCloudReady()) return { success: false, message: 'Sin conexión con la nube' }
       const fileName = basename(filePath || 'archivo.xlsx')
